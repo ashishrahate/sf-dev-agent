@@ -17,6 +17,7 @@ import sys
 from typing import Any, Callable
 
 from sf_dev_agent.models.schemas import OrgConnection, ToolDefinition
+from sf_dev_agent.paths import agent_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -413,9 +414,7 @@ class ToolRegistry:
 
     def _run_sf_cli(self, args: list[str], timeout: int = 240) -> dict[str, Any]:
         """Run an sf CLI command from the agent workspace and return parsed JSON."""
-        import os
-        from pathlib import Path
-        workspace = Path(os.environ.get("AGENT_WORKSPACE", "/tmp/agent-workspace"))
+        workspace = agent_workspace()
 
         # On Windows, sf is installed as sf.cmd — bare "sf" only works with shell=True
         sf_exe = "sf.cmd" if sys.platform == "win32" else "sf"
@@ -513,11 +512,7 @@ class ToolRegistry:
 
     def _exec_file_write(self, file_path: str, content: str) -> dict[str, Any]:
         """Write a file to the workspace."""
-        import os
-        from pathlib import Path
-
-        # Ensure we stay within the workspace
-        workspace = Path(os.environ.get("AGENT_WORKSPACE", "/tmp/agent-workspace"))
+        workspace = agent_workspace()
         target = (workspace / file_path).resolve()
 
         if not str(target).startswith(str(workspace.resolve())):
@@ -530,10 +525,7 @@ class ToolRegistry:
 
     def _exec_file_read(self, file_path: str) -> dict[str, Any]:
         """Read a file from the workspace."""
-        import os
-        from pathlib import Path
-
-        workspace = Path(os.environ.get("AGENT_WORKSPACE", "/tmp/agent-workspace"))
+        workspace = agent_workspace()
         target = (workspace / file_path).resolve()
 
         if not str(target).startswith(str(workspace.resolve())):
@@ -549,9 +541,7 @@ class ToolRegistry:
         self, command: str, description: str = "", timeout: int = 240
     ) -> dict[str, Any]:
         """Execute a shell command in the agent workspace."""
-        import os
-        from pathlib import Path
-        workspace = Path(os.environ.get("AGENT_WORKSPACE", "/tmp/agent-workspace"))
+        workspace = agent_workspace()
         logger.info("Bash [%s] (cwd=%s): %s", description, workspace, command)
 
         try:

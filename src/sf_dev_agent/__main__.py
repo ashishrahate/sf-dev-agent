@@ -1,10 +1,10 @@
 """CLI entry point for the Salesforce Developer Agent.
 
 Usage:
-    uv run python -m sf_dev_agent
-    uv run python -m sf_dev_agent "Create an Account deduplication trigger"
-    uv run python -m sf_dev_agent --provider openai "Create a trigger"
-    uv run python -m sf_dev_agent --provider gemini --model gemini-2.5-pro "Create a trigger"
+    uv run python -m sf_dev_agent setup                          # interactive wizard
+    uv run python -m sf_dev_agent                                # interactive REPL
+    uv run python -m sf_dev_agent "Create an Account trigger"    # one-shot
+    uv run python -m sf_dev_agent --provider gemini "..."        # provider override
 """
 
 from __future__ import annotations
@@ -22,11 +22,16 @@ from rich.prompt import Prompt
 from sf_dev_agent.agent import AgentLoop
 from sf_dev_agent.models.schemas import OrgConnection
 from sf_dev_agent.providers import PROVIDERS, create_provider
+from sf_dev_agent.sf_config import (
+    derive_api_version,
+    derive_instance_url,
+    derive_org_type,
+)
 
 console = Console()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Salesforce Developer Agent — AI-powered Salesforce development",
     )
@@ -34,13 +39,16 @@ def parse_args() -> argparse.Namespace:
         "request",
         nargs="?",
         default=None,
-        help="The task to perform (optional — enters interactive mode if omitted)",
+        help=(
+            "The task to perform, OR the literal word 'setup' to launch the "
+            "interactive setup wizard. Omit for interactive REPL mode."
+        ),
     )
     parser.add_argument(
         "--provider",
         choices=list(PROVIDERS),
         default=None,
-        help="LLM provider to use (default: reads LLM_PROVIDER env var, falls back to 'anthropic')",
+        help="LLM provider (default: LLM_PROVIDER env, or auto-detected from set API key)",
     )
     parser.add_argument(
         "--model",
@@ -49,24 +57,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--org-alias",
-        default=os.environ.get("SF_ORG_ALIAS", "default"),
-        help="Salesforce org alias (default: SF_ORG_ALIAS env var or 'default')",
+        default=os.environ.get("SF_ORG_ALIAS"),
+        help="Salesforce org alias (default: SF_ORG_ALIAS env var)",
     )
     parser.add_argument(
         "--org-type",
         choices=["sandbox", "scratch", "production", "developer"],
-        default=os.environ.get("SF_ORG_TYPE", "scratch"),
-        help="Type of Salesforce org (default: SF_ORG_TYPE env var or 'scratch')",
+        default=None,
+        help="Override auto-detected org type",
     )
     parser.add_argument(
         "--instance-url",
-        default=os.environ.get("SF_INSTANCE_URL", "https://test.salesforce.com"),
-        help="Salesforce instance URL (default: SF_INSTANCE_URL env var)",
+        default=None,
+        help="Override auto-detected instance URL",
     )
     parser.add_argument(
         "--api-version",
-        default=os.environ.get("SF_API_VERSION", "62.0"),
-        help="Salesforce API version (default: SF_API_VERSION env var or 62.0)",
+        default=None,
+        help="Override API version (default: read from workspace/sfdx-project.json)",
     )
     parser.add_argument(
         "--mock-org",
@@ -81,25 +89,52 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> None:
     load_dotenv()
 
-    args = parse_args()  # called after load_dotenv so os.environ defaults resolve
+    # Special-case the setup wizard before normal arg parsing — it has no other flags.
+    if len(sys.argv) >= 2 and sys.argv[1] == "setup":
+        from sf_dev_agent.setup_wizard import run_setup
+        run_setup()
+        return
+
+    args = parse_args()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    if not args.org_alias:
+        console.print(
+            "[bold red]No Salesforce org configured.[/bold red] "
+            "Run [cyan]uv run python -m sf_dev_agent setup[/cyan] to get started, "
+            "or set SF_ORG_ALIAS in your .env file."
+        )
+        sys.exit(1)
+
+    # Org type / instance URL are auto-detected via sf CLI; CLI flags or env vars override.
+    org_type = args.org_type or os.environ.get("SF_ORG_TYPE") or derive_org_type(args.org_alias)
+    instance_url = (
+        args.instance_url
+        or os.environ.get("SF_INSTANCE_URL")
+        or derive_instance_url(args.org_alias)
+    )
+    api_version = (
+        args.api_version
+        or os.environ.get("SF_API_VERSION")
+        or derive_api_version()
+    )
+
     org = OrgConnection(
         tenant_id="local-dev",
         org_alias=args.org_alias,
-        org_type=args.org_type,
-        instance_url=args.instance_url,
-        api_version=args.api_version,
+        org_type=org_type,
+        instance_url=instance_url,
+        api_version=api_version,
     )
 
     try:
@@ -108,7 +143,7 @@ def main() -> None:
         console.print(f"[bold red]Provider not installed:[/bold red] {exc}")
         sys.exit(1)
     except ValueError as exc:
-        console.print(f"[bold red]Invalid provider:[/bold red] {exc}")
+        console.print(f"[bold red]{exc}[/bold red]")
         sys.exit(1)
 
     agent = AgentLoop(org=org, provider=provider, mock_org=args.mock_org)

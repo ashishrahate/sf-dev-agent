@@ -4,7 +4,7 @@ An AI-powered CLI agent that plans, approves, and executes Salesforce developmen
 
 The agent runs a **plan → approve → execute** loop:
 
-1. **Phase 1 — Planning.** It inspects the org (read-only), drafts a structured plan with risk + rollback, and submits it for approval.
+1. **Phase 1 — Planning.** Inspects the org (read-only), drafts a structured plan with risk + rollback, submits it for approval.
 2. **Approval gate.** You review the plan and type `yes` / `no` / `modify`.
 3. **Phase 2 — Execution.** Only after approval does it write files and deploy to the org.
 
@@ -12,183 +12,127 @@ It is **provider-agnostic** — works with Anthropic Claude, OpenAI GPT, or Goog
 
 ---
 
-## Prerequisites
-
-You need all four of these installed and ready before the agent will run.
-
-| Requirement | Why | How to get it |
-|---|---|---|
-| **Python 3.12+** | Runs the agent | [python.org/downloads](https://www.python.org/downloads/) |
-| **uv** | Python package + venv manager | `pip install uv` or [docs.astral.sh/uv](https://docs.astral.sh/uv/) |
-| **Salesforce CLI (`sf`)** | Talks to your org | `npm install -g @salesforce/cli` (Node 18+) |
-| **An LLM API key** | The agent's brain | One of: Anthropic, OpenAI, or Google Gemini (free tier works) |
-
-Verify each works:
+## Quickstart (5 minutes)
 
 ```bash
-python --version    # 3.12 or higher
-uv --version
-sf --version        # 2.100+ recommended
-node --version      # 18+; sf CLI needs it
+git clone https://github.com/ashishrahate/sf-dev-agent
+cd sf-dev-agent
+uv sync && uv pip install -e '.[gemini]'    # pick your provider here
+uv run python -m sf_dev_agent setup         # interactive wizard
+uv run python -m sf_dev_agent "List all Apex classes in the org"
 ```
+
+That's the whole flow. The wizard handles everything else.
 
 ---
 
-## Step-by-step setup
+## What you actually need to provide
 
-### 1. Clone and install dependencies
+| You provide | The agent figures out |
+|---|---|
+| ✅ One LLM API key (Gemini / OpenAI / Anthropic) | The provider, from whichever key you set |
+| ✅ A Salesforce org alias | Instance URL, org type, API version |
+|   | Workspace path (defaults to `<repo>/workspace`) |
 
-```bash
-git clone <this-repo>
-cd sf-dev-agent
-uv sync                                  # installs base dependencies
-uv pip install -e '.[gemini]'            # add your provider: gemini | openai | anthropic | all
-```
+The wizard prompts for the two on the left and writes a minimal `.env` for you.
 
-### 2. Authenticate to your Salesforce org
+---
 
-You need at least one connected org. The agent will use it via the `sf` CLI.
+## Prerequisites
 
-```bash
-sf org login web --alias AgentforceOrg --instance-url https://login.salesforce.com
-```
-
-This opens a browser, you log in, and `sf` stores the auth token under the alias `AgentforceOrg`. Verify:
-
-```bash
-sf org list
-```
-
-You should see your alias with status `Connected`.
-
-> **No org yet?** Sign up free at [developer.salesforce.com/signup](https://developer.salesforce.com/signup) — pick "Developer Edition." It's free forever and gives you a real org to deploy to.
-
-### 3. Get an LLM API key
-
-Pick **one** provider — you only need one key.
-
-| Provider | Where to get a key | Free tier? |
+| Requirement | Why | How |
 |---|---|---|
-| **Google Gemini** | [aistudio.google.com](https://aistudio.google.com) → "Get API key" | Yes — 250 req/day for `gemini-2.5-flash` |
-| **OpenAI** | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | No — pay-as-you-go |
-| **Anthropic** | [console.anthropic.com](https://console.anthropic.com) | No — pay-as-you-go |
+| **Python 3.12+** | Runs the agent | [python.org/downloads](https://www.python.org/downloads/) |
+| **uv** | Python package manager | `pip install uv` |
+| **Salesforce CLI** | Talks to your org | `npm install -g @salesforce/cli` (Node 18+) |
+| **An LLM API key** | The agent's brain | One of: Gemini (free), OpenAI, or Anthropic |
 
-> **Gemini free-tier note:** the daily quota is shared *per Google AI Studio project, not per key*. If you exhaust it, rotating the key in the same project won't help — create a new project or enable billing.
-
-### 4. Configure your environment
-
-Copy the example file and fill in your values:
+Verify each:
 
 ```bash
-cp .env.example .env
+python --version    # 3.12+
+uv --version
+sf --version        # 2.100+
 ```
 
-Edit `.env`:
+> **No Salesforce org yet?** Sign up free at [developer.salesforce.com/signup](https://developer.salesforce.com/signup) — pick "Developer Edition." Free forever, real org.
+
+---
+
+## The setup wizard
+
+```bash
+uv run python -m sf_dev_agent setup
+```
+
+The wizard will:
+
+1. Verify `sf` CLI is installed
+2. Show your connected orgs in a numbered menu (or run `sf org login web` if you have none)
+3. Let you pick an LLM provider — links you to the exact key page
+4. Validate the key with a one-token test call (fail-fast on bad keys)
+5. Write a minimal `.env`
+
+After it finishes, you're done — go straight to "Running the agent."
+
+---
+
+## Running the agent
+
+```bash
+# One-shot
+uv run python -m sf_dev_agent "Create an Account trigger that prevents duplicate Phone numbers"
+
+# Interactive REPL
+uv run python -m sf_dev_agent
+
+# Override the provider for a single run
+uv run python -m sf_dev_agent --provider openai "..."
+
+# Test the loop without touching your org or burning LLM tokens
+uv run python -m sf_dev_agent --mock-org "Create a trigger"
+```
+
+When you ask for something that creates/modifies metadata, the agent:
+
+1. Runs **preflight queries** (existing triggers, flows, validation rules on the target object).
+2. Submits an **execution plan** with steps, risk level, rollback strategy, and impact counts.
+3. Pauses at: `Approve this plan? [yes/no/modify]`
+4. On `yes`, writes files to `workspace/force-app/main/default/` and runs `sf project deploy start` against your org with the test class.
+
+---
+
+## Manual configuration (skip the wizard)
+
+If you'd rather edit `.env` by hand, the **minimum** is:
 
 ```ini
-# Pick one provider
-LLM_PROVIDER=gemini
 GOOGLE_API_KEY=AIzaSy...your-key-here
-
-# Your Salesforce org (must match the alias from `sf org list`)
 SF_ORG_ALIAS=AgentforceOrg
-SF_ORG_TYPE=developer                    # or: sandbox | scratch | production
-SF_INSTANCE_URL=https://orgfarm-XXXXX-dev-ed.develop.my.salesforce.com
-SF_API_VERSION=62.0
-
-# Where the agent writes files (use absolute path)
-AGENT_WORKSPACE=C:/Users/you/projects/sf-dev-agent/workspace
 ```
 
-> **Tip:** get your real `SF_INSTANCE_URL` from `sf org display --target-org AgentforceOrg --json` — copy the `instanceUrl` field.
+That's it. The agent auto-detects the provider from the key, derives the org type and instance URL from the sf CLI, and reads the API version from `workspace/sfdx-project.json`.
 
-### 5. Verify the workspace is set up
-
-The repo ships with a pre-configured `workspace/` directory containing `sfdx-project.json` and `config/project-scratch-def.json`. The agent reads/writes Salesforce metadata there.
-
-If it's missing, recreate it:
-
-```
-workspace/
-├── sfdx-project.json
-├── config/
-│   └── project-scratch-def.json
-└── force-app/main/default/
-    ├── classes/
-    ├── triggers/
-    └── flows/
-```
-
-### 6. First run — read-only sanity check
-
-Start with a question that doesn't change anything:
-
-```bash
-uv run python -m sf_dev_agent --provider gemini "List all Apex classes in the org and tell me what they do"
-```
-
-You should see:
-- Banner showing your org alias and provider
-- `Phase 1: Planning` with one or more `Tool call: sf_metadata_describe` lines
-- A natural-language summary of the classes the agent found
-
-If this works, the wiring is correct.
-
-### 7. Full flow — plan, approve, deploy
-
-Now try a real task:
-
-```bash
-uv run python -m sf_dev_agent --provider gemini "Create a before-insert/before-update Apex trigger on Account that prevents duplicate Accounts based on the Phone field. Include a test class with at least 2 methods and 90% coverage."
-```
-
-The agent will:
-
-1. Run preflight checks (looks for existing triggers/flows/validation rules on Account).
-2. Print an **Execution Plan** panel with steps, risk level, rollback strategy, and impact counts.
-3. Prompt: `Approve this plan? [yes/no/modify]`
-   - `yes` — moves to Phase 2, writes the files, deploys, runs tests
-   - `no` — cancels the task
-   - `modify` — describe what to change, the agent re-plans
-4. On approval, you'll see file writes, a `sf project deploy start`, and test results.
-
-Once deployed, verify in your org:
-
-```bash
-sf org open --target-org AgentforceOrg --path /lightning/setup/ApexTriggers/home
-```
+See `.env.example` for the complete list of optional overrides.
 
 ---
 
 ## Command reference
 
 ```bash
-# Required: pick a provider (or set LLM_PROVIDER in .env)
---provider {anthropic|openai|gemini}
+# Provider / model
+--provider {anthropic|openai|gemini}     # auto-detected from API key if unset
+--model gemini-2.5-pro                   # override the provider's default
 
-# Optional: override the default model for that provider
---model gemini-2.5-pro
-
-# Optional: override the org from .env
+# Org overrides (rarely needed — auto-detected from sf CLI)
 --org-alias MyScratch
---org-type scratch
+--org-type {sandbox|scratch|production|developer}
 --instance-url https://test.salesforce.com
 --api-version 62.0
 
-# Test the agent loop without hitting Salesforce CLI (canned responses)
---mock-org
-
-# Debug logging
---verbose
-```
-
-**Interactive mode** — omit the prompt to chat back-and-forth:
-
-```bash
-uv run python -m sf_dev_agent --provider gemini
-sf-agent: Show me all the Account validation rules
-...
-sf-agent: Now add a new one that requires Industry to be set
+# Misc
+--mock-org                               # canned SF responses; LLM still real
+--verbose                                # debug logging
 ```
 
 ---
@@ -197,12 +141,15 @@ sf-agent: Now add a new one that requires Industry to be set
 
 | Symptom | Fix |
 |---|---|
-| `FileNotFoundError: [WinError 2]` calling `sf` | The agent uses `sf.cmd` on Windows — make sure `npm install -g @salesforce/cli` succeeded and `where sf.cmd` returns a path. |
-| `429 RESOURCE_EXHAUSTED` from Gemini | Daily free-tier quota (20–250 req/day depending on model) hit. Create a new Google AI Studio project, or enable billing, or wait for the daily reset (midnight Pacific). |
-| `InvalidProjectWorkspaceError` from sf | The workspace path in `.env` (`AGENT_WORKSPACE`) doesn't contain a valid `sfdx-project.json`. Verify the path and the file. |
-| `NotADevHubError` when creating scratch orgs | Your target org isn't a Dev Hub. Either use a Developer Edition org directly (set `SF_ORG_TYPE=developer`) or enable Dev Hub in Setup → Dev Hub. |
-| Plan never appears, agent just answers | The model decided no plan was needed (read-only question). For write operations, the system prompt requires `submit_plan` — re-phrase to be explicit about creating/modifying. |
-| `Provider not installed` | Run `uv pip install -e '.[gemini]'` (or `[openai]` / `[anthropic]` / `[all]`) for your chosen provider. |
+| `No LLM provider configured` | Set one of `GOOGLE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` in `.env`, or run the wizard |
+| `Multiple API keys are set` | Set `LLM_PROVIDER=...` in `.env` to pick one, or pass `--provider` |
+| `No Salesforce org configured` | Set `SF_ORG_ALIAS=...` in `.env` (must match a name from `sf org list`) |
+| `FileNotFoundError: [WinError 2]` calling `sf` | Run `npm install -g @salesforce/cli`; agent uses `sf.cmd` on Windows |
+| `429 RESOURCE_EXHAUSTED` (Gemini) | Daily free-tier quota hit. Create a new Google AI Studio project, enable billing, or wait until midnight Pacific. Note: rotating keys in the *same* project shares the same quota. |
+| `InvalidProjectWorkspaceError` from sf | `workspace/sfdx-project.json` is missing or invalid. The repo ships with one — verify it exists. |
+| `NotADevHubError` | Your target org isn't a Dev Hub. Either point at a Developer Edition org directly or enable Dev Hub in your org's Setup. |
+| Plan never appears, agent just answers | Read-only question → no plan needed. For write ops, phrase it as create/modify. |
+| `Provider not installed` | `uv pip install -e '.[gemini]'` (or `[openai]` / `[anthropic]` / `[all]`) |
 
 ---
 
@@ -211,13 +158,16 @@ sf-agent: Now add a new one that requires Industry to be set
 ```
 sf-dev-agent/
 ├── src/sf_dev_agent/
-│   ├── __main__.py            # CLI entry point
+│   ├── __main__.py            # CLI entry point + setup dispatcher
+│   ├── setup_wizard.py        # interactive setup flow
 │   ├── agent.py               # ReAct loop, plan-approve-execute state machine
+│   ├── paths.py               # repo_root() / agent_workspace() helpers
+│   ├── sf_config.py           # auto-derive org type / instance URL / API version
 │   ├── providers/             # anthropic / openai / gemini adapters
 │   ├── tools/registry.py      # sf CLI wrappers, file I/O, bash
 │   ├── prompts/               # system prompt template
 │   └── models/schemas.py      # Pydantic models (Task, ExecutionPlan, ...)
-├── workspace/                 # SFDX project — agent writes metadata here
+├── workspace/                 # SFDX project — agent reads/writes metadata here
 ├── tests/                     # pytest suite
 ├── docs/                      # design notes, project summary
 └── .env                       # your config (gitignored)
@@ -230,7 +180,7 @@ sf-dev-agent/
 - **Read-only tools** (`sf_metadata_describe`, `sf_soql_query`, `sf_retrieve`, `code_search`, `file_read`) run freely during planning.
 - **Write tools** (`file_write`, `sf_source_deploy`, `sf_apex_execute`, `bash`) are **blocked during Phase 1** — they fail with a clear error if the LLM tries to call them before approval.
 - **Approval is required** before any write can execute. There is no `--yes` flag.
-- **Mock-org mode** (`--mock-org`) stubs all `sf` CLI calls — useful for testing prompts and the plan flow without touching your org.
+- **Mock-org mode** (`--mock-org`) stubs all `sf` CLI calls but the LLM is still real — useful for testing prompts and the plan flow without touching your org.
 
 ---
 
