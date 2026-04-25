@@ -1,0 +1,38 @@
+[project]
+name = "sf-dev-agent"
+version = "0.1.0"
+description = "Autonomous AI agent for Salesforce platform development — writes Apex, builds LWCs, deploys metadata, and manages the full Salesforce dev lifecycle."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.13.3",
+    "python-dotenv>=1.2.2",
+    "rich>=15.0.0",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.97.0"]
+openai = ["openai>=1.0.0"]
+gemini = ["google-genai>=1.0.0"]
+all = ["anthropic>=0.97.0", "openai>=1.0.0", "google-genai>=1.0.0"]
+
+[project.scripts]
+sf-agent = "sf_dev_agent.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.8.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
