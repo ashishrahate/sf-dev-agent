@@ -374,6 +374,25 @@ class MetadataIndex:
         self._conn.commit()
         return cur.rowcount or 0
 
+    def delete_children_of(self, parent_ids: list[str]) -> int:
+        """Delete every row whose parent_id is in `parent_ids`.
+
+        Used by delta refresh before re-ingesting a parent (e.g. CustomObject):
+        clears stale children whose source files no longer exist in the org so
+        the post-ingest state matches the org's exactly. The parent rows
+        themselves are untouched — the caller's targeted retrieve + ingest
+        will upsert them with current source.
+        """
+        if not parent_ids:
+            return 0
+        placeholders = ",".join(["?"] * len(parent_ids))
+        cur = self._conn.execute(
+            f"DELETE FROM components WHERE parent_id IN ({placeholders})",
+            tuple(parent_ids),
+        )
+        self._conn.commit()
+        return cur.rowcount or 0
+
     # ------------------------------------------------------------------
     # Embeddings
     # ------------------------------------------------------------------

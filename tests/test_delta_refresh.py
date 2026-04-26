@@ -154,10 +154,11 @@ def test_compute_deltas_unsupported_types_surfaced() -> None:
     plan = compute_deltas(
         inv,
         indexed={},
-        requested_types=["ApexClass", "CustomObject"],
+        requested_types=["ApexClass", "Flow"],
     )
-    assert "CustomObject" in plan.unsupported_types
+    assert "Flow" in plan.unsupported_types
     assert "ApexClass" not in plan.unsupported_types
+    assert "CustomObject" not in plan.unsupported_types  # now delta-supported
 
 
 # ---------------------------------------------------------------------------
@@ -361,13 +362,291 @@ def test_build_index_full_bypasses_delta(
     assert state["calls"]["retrieve_components"] == 0
 
 
+# ---------------------------------------------------------------------------
+# CustomObject inventory — two-query merge
+# ---------------------------------------------------------------------------
+
+def test_fetch_org_inventory_custom_object_merges_field_max(monkeypatch) -> None:
+    """CustomObject timestamp should be max(object_lmd, max_field_lmd)."""
+    from sf_dev_agent.context import delta as delta_module
+
+    # Two queries fire: object metadata, then field aggregate.
+    # Match on the SOQL prefix so we can return the right canned payload.
+    def fake_query(org_alias, query, timeout):
+        if "FROM CustomObject" in query:
+            return [
+                {
+                    "Id": "01I0000000ObjA",
+                    "DeveloperName": "Project_Task",
+                    "NamespacePrefix": None,
+                    "LastModifiedDate": "2026-03-01T10:00:00.000+0000",
+                },
+                {
+                    "Id": "01I0000000ObjB",
+                    "DeveloperName": "Invoice",
+                    "NamespacePrefix": "acme",
+                    "LastModifiedDate": "2026-04-01T10:00:00.000+0000",
+                },
+            ], None
+        if "FROM CustomField" in query:
+            return [
+                # ObjA's newest field is *newer* than the object's own LMD.
+                {"TableEnumOrId": "01I0000000ObjA", "lmd": "2026-04-15T08:00:00.000+0000"},
+                # ObjB's newest field is *older* than the object's LMD.
+                {"TableEnumOrId": "01I0000000ObjB", "lmd": "2025-01-01T00:00:00.000+0000"},
+            ], None
+        return [], None
+
+    monkeypatch.setattr(delta_module, "_query_tooling", fake_query)
+
+    inv = delta_module.fetch_org_inventory("StubOrg", ["CustomObject"])
+
+    assert inv.errors == []
+    by_name = {c.api_name: c for c in inv.components}
+    # Project_Task__c picks the field's newer timestamp.
+    assert "Project_Task__c" in by_name
+    assert by_name["Project_Task__c"].last_modified_at == "2026-04-15T08:00:00.000+0000"
+    # acme__Invoice__c picks the object's newer timestamp.
+    assert "acme__Invoice__c" in by_name
+    assert by_name["acme__Invoice__c"].last_modified_at == "2026-04-01T10:00:00.000+0000"
+
+
+def test_fetch_org_inventory_custom_object_field_query_failure_falls_back(
+    monkeypatch,
+) -> None:
+    """If the CustomField aggregate fails, fall back to object-only timestamps."""
+    from sf_dev_agent.context import delta as delta_module
+
+    def fake_query(org_alias, query, timeout):
+        if "FROM CustomObject" in query:
+            return [
+                {
+                    "Id": "01I0000000Obj1",
+                    "DeveloperName": "Widget",
+                    "NamespacePrefix": None,
+                    "LastModifiedDate": "2026-03-01T10:00:00.000+0000",
+                },
+            ], None
+        if "FROM CustomField" in query:
+            return [], "permissions: insufficient access"
+        return [], None
+
+    monkeypatch.setattr(delta_module, "_query_tooling", fake_query)
+
+    inv = delta_module.fetch_org_inventory("StubOrg", ["CustomObject"])
+
+    # Error captured, but inventory still returns the object.
+    assert any("CustomField" in e for e in inv.errors)
+    assert len(inv.components) == 1
+    assert inv.components[0].api_name == "Widget__c"
+    assert inv.components[0].last_modified_at == "2026-03-01T10:00:00.000+0000"
+
+
+def test_compute_deltas_custom_object_modified_via_field() -> None:
+    """A field-only edit (reflected in the merged timestamp) triggers re-fetch."""
+    inv = OrgInventory(
+        types_queried=["CustomObject"],
+        components=[
+            # Merged timestamp newer than what we indexed.
+            OrgComponent("CustomObject", "Project_Task__c", "2026-04-15T08:00:00.000+0000"),
+        ],
+    )
+    plan = compute_deltas(
+        inv,
+        indexed={"CustomObject:Project_Task__c": "2026-03-15T00:00:00+00:00"},
+        requested_types=["CustomObject"],
+    )
+    assert plan.to_fetch == ["CustomObject:Project_Task__c"]
+
+
+def test_compute_deltas_custom_object_deletion_marks_object_only() -> None:
+    """When a CustomObject is gone from the org, only the parent goes in to_delete.
+
+    Child CustomFields cascade automatically via the DB FK on parent_id —
+    the planner doesn't need to enumerate them.
+    """
+    inv = OrgInventory(
+        types_queried=["CustomObject"],
+        components=[],
+    )
+    plan = compute_deltas(
+        inv,
+        indexed={
+            "CustomObject:Removed__c": "2026-03-01T00:00:00+00:00",
+            # CustomField rows of the same parent — must NOT show up in to_delete
+            # because their type wasn't directly queried.
+            "CustomField:Removed__c.Note__c": "2026-03-01T00:00:00+00:00",
+        },
+        requested_types=["CustomObject"],
+    )
+    assert plan.to_delete == ["CustomObject:Removed__c"]
+
+
+# ---------------------------------------------------------------------------
+# CustomObject orchestration — child cleanup on re-fetch
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fixture_object_v1(tmp_path: Path) -> Path:
+    """A CustomObject with two fields."""
+    base = tmp_path / "obj_v1" / "force-app" / "main" / "default" / "objects" / "Project_Task__c"
+    _write(
+        base / "Project_Task__c.object-meta.xml",
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">\n'
+        '  <label>Project Task</label>\n'
+        '  <sharingModel>ReadWrite</sharingModel>\n'
+        '</CustomObject>\n',
+    )
+    _write(
+        base / "fields" / "Note__c.field-meta.xml",
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">\n'
+        '  <fullName>Note__c</fullName>\n'
+        '  <label>Note</label>\n'
+        '  <type>Text</type>\n'
+        '  <length>255</length>\n'
+        '</CustomField>\n',
+    )
+    _write(
+        base / "fields" / "DueDate__c.field-meta.xml",
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">\n'
+        '  <fullName>DueDate__c</fullName>\n'
+        '  <label>Due Date</label>\n'
+        '  <type>Date</type>\n'
+        '</CustomField>\n',
+    )
+    return tmp_path / "obj_v1"
+
+
+@pytest.fixture
+def fixture_object_v2_field_dropped(tmp_path: Path) -> Path:
+    """Same CustomObject but with DueDate__c removed (only Note__c remains)."""
+    base = tmp_path / "obj_v2" / "force-app" / "main" / "default" / "objects" / "Project_Task__c"
+    _write(
+        base / "Project_Task__c.object-meta.xml",
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">\n'
+        '  <label>Project Task</label>\n'
+        '  <sharingModel>ReadWrite</sharingModel>\n'
+        '</CustomObject>\n',
+    )
+    _write(
+        base / "fields" / "Note__c.field-meta.xml",
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">\n'
+        '  <fullName>Note__c</fullName>\n'
+        '  <label>Note (renamed)</label>\n'
+        '  <type>Text</type>\n'
+        '  <length>500</length>\n'
+        '</CustomField>\n',
+    )
+    return tmp_path / "obj_v2"
+
+
+def test_build_index_delta_custom_object_drops_stale_child_field(
+    stub_inventory_and_retrieve,
+    fixture_object_v1: Path,
+    fixture_object_v2_field_dropped: Path,
+    tmp_path: Path,
+) -> None:
+    """When a CustomObject is re-fetched, fields that disappeared in the org get pruned."""
+    state = stub_inventory_and_retrieve
+    db_path = tmp_path / "obj_delta.db"
+
+    # Seed: ingest v1 so Project_Task__c has both Note__c + DueDate__c.
+    ingest_directory(source_dir=fixture_object_v1, db_path=db_path)
+    with MetadataIndex(db_path) as index:
+        v1_field_ids = {c.id for c in index.fields_of("Project_Task__c")}
+    assert "CustomField:Project_Task__c.Note__c" in v1_field_ids
+    assert "CustomField:Project_Task__c.DueDate__c" in v1_field_ids
+
+    # Org inventory: object's merged timestamp moved past indexed -> re-fetch.
+    state["inventory"] = OrgInventory(
+        types_queried=["CustomObject"],
+        components=[
+            OrgComponent("CustomObject", "Project_Task__c", "2099-01-01T00:00:00.000+0000"),
+        ],
+    )
+    # Targeted retrieve returns the v2 source (DueDate__c gone).
+    state["components_retrieve_source"] = fixture_object_v2_field_dropped
+
+    result = build_index(
+        org_alias="StubOrg",
+        db_path=db_path,
+        retrieve_dir=tmp_path / "stage_obj",
+        component_types=["CustomObject"],
+        delta=True,
+    )
+
+    assert result.success
+    assert result.delta_mode is True
+    # 1 parent re-fetched + 1 surviving child re-ingested = 2 components written.
+    # (DueDate__c was wiped before re-ingest; Note__c is upserted fresh.)
+    assert result.components_fetched >= 2
+
+    with MetadataIndex(db_path) as index:
+        post_field_ids = {c.id for c in index.fields_of("Project_Task__c")}
+    assert "CustomField:Project_Task__c.Note__c" in post_field_ids, \
+        "Surviving field should still be in the index"
+    assert "CustomField:Project_Task__c.DueDate__c" not in post_field_ids, \
+        "Field deleted from the org should be pruned from the index"
+
+
+def test_build_index_delta_custom_object_full_delete_cascades_fields(
+    stub_inventory_and_retrieve,
+    fixture_object_v1: Path,
+    tmp_path: Path,
+) -> None:
+    """Deleting the whole CustomObject should cascade-drop its child fields via FK."""
+    state = stub_inventory_and_retrieve
+    db_path = tmp_path / "obj_cascade.db"
+
+    # Seed v1.
+    ingest_directory(source_dir=fixture_object_v1, db_path=db_path)
+    with MetadataIndex(db_path) as index:
+        assert index.find_by_id("CustomObject:Project_Task__c") is not None
+        assert len(index.fields_of("Project_Task__c")) == 2
+
+    # Org inventory is empty — the object is gone.
+    state["inventory"] = OrgInventory(
+        types_queried=["CustomObject"],
+        components=[],
+    )
+    # No targeted retrieve will fire (nothing to fetch).
+    base = tmp_path / "src_empty" / "force-app" / "main" / "default"
+    base.mkdir(parents=True, exist_ok=True)
+    state["components_retrieve_source"] = tmp_path / "src_empty"
+
+    result = build_index(
+        org_alias="StubOrg",
+        db_path=db_path,
+        retrieve_dir=tmp_path / "stage_cascade",
+        component_types=["CustomObject"],
+        delta=True,
+    )
+
+    assert result.success
+    assert result.components_deleted == 1, "Only the parent is in to_delete"
+
+    with MetadataIndex(db_path) as index:
+        # FK CASCADE should have removed both child fields when the parent was deleted.
+        assert index.find_by_id("CustomObject:Project_Task__c") is None
+        assert index.fields_of("Project_Task__c") == []
+
+
 def test_build_index_delta_supports_mixed_types(
     stub_inventory_and_retrieve, tmp_path: Path
 ) -> None:
-    """Delta-supported types take the delta path; CustomObject takes the full path."""
+    """Delta-supported types take the delta path; unsupported types take the full path.
+
+    Flow stands in for any not-yet-supported metadata type — the orchestrator
+    has to gracefully accept the mix and route each side to the right path.
+    """
     state = stub_inventory_and_retrieve
 
-    # Only ApexClass appears in inventory (CustomObject isn't in SUPPORTED_DELTA_TYPES).
+    # Only ApexClass appears in inventory (Flow isn't in SUPPORTED_DELTA_TYPES).
     state["inventory"] = OrgInventory(
         types_queried=["ApexClass"],
         components=[
@@ -385,7 +664,7 @@ def test_build_index_delta_supports_mixed_types(
         org_alias="StubOrg",
         db_path=db_path,
         retrieve_dir=tmp_path / "stage",
-        component_types=["ApexClass", "CustomObject"],
+        component_types=["ApexClass", "Flow"],
         delta=True,
     )
 
@@ -393,7 +672,7 @@ def test_build_index_delta_supports_mixed_types(
     assert result.delta_mode is True
     # Inventory queried once for ApexClass only.
     assert state["calls"]["fetch_inventory"] == 1
-    # CustomObject took the full path.
+    # Flow took the full path.
     assert state["calls"]["retrieve"] == 1
     # ApexClass took the delta path.
     assert state["calls"]["retrieve_components"] == 1

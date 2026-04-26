@@ -7,17 +7,29 @@ indexing — plus components newly created since, plus deletions to clean out.
 
 Flow:
     1. fetch_org_inventory(alias, types) -> OrgInventory
-       Hits the Tooling API once per type to pull (Id, Name, LastModifiedDate).
+       Hits the Tooling API once per type (twice for CustomObject — see below)
+       to pull (Id, Name, LastModifiedDate) tuples.
     2. compute_deltas(inventory, index) -> DeltaPlan
        String-compares ISO-8601 timestamps to classify each component as
        to_fetch (new or changed) or to_delete (in index but not in org).
     3. The orchestrator (build_index) consumes the plan: targeted retrieve for
        to_fetch, MetadataIndex.delete_components for to_delete.
 
-Slice 1 of delta: ApexClass + ApexTrigger only. CustomObject's Tooling API
-representation is more involved (queries against EntityDefinition, namespace
-considerations, plus child fields/validation rules need their own deltas) —
-documented as a follow-up. Unsupported types fall back to full retrieve.
+CustomObject takes two Tooling queries:
+    - `CustomObject`: returns object-level LastModifiedDate. Only catches
+      changes to the object's own metadata (label, sharingModel, etc.).
+    - `CustomField` GROUPed by parent: returns max(field.LastModifiedDate) per
+      object, so adding or editing a single field still triggers a re-fetch
+      even when the object's own row hasn't moved.
+
+Per-object timestamp = max(object_meta_modified, max_field_modified). When
+the orchestrator re-fetches a CustomObject, it also calls
+`MetadataIndex.delete_children_of(...)` to drop stale CustomField rows whose
+*.field-meta.xml file no longer exists in the org's source.
+
+Standard objects (Account, Contact, etc.) don't appear in `CustomObject`
+queries and are out of scope for this slice — they fall back to full retrieve
+when listed alongside an unsupported component type.
 """
 
 from __future__ import annotations
@@ -36,7 +48,9 @@ logger = logging.getLogger(__name__)
 
 # Component types this slice supports for delta refresh. Anything outside
 # this set is excluded from the inventory pass and falls back to full retrieve.
-SUPPORTED_DELTA_TYPES: frozenset[str] = frozenset({"ApexClass", "ApexTrigger"})
+SUPPORTED_DELTA_TYPES: frozenset[str] = frozenset(
+    {"ApexClass", "ApexTrigger", "CustomObject"}
+)
 
 
 @dataclass
@@ -84,11 +98,142 @@ def _sf_exe() -> str:
 
 
 # Tooling API SOQL per supported type. Each row must yield (api_name, last_modified).
-# Some Tooling API objects use `DeveloperName` instead of `Name`; map accordingly.
+# CustomObject is special-cased — see _fetch_custom_object_inventory.
 _INVENTORY_QUERIES: dict[str, str] = {
     "ApexClass": "SELECT Id, Name, LastModifiedDate FROM ApexClass",
     "ApexTrigger": "SELECT Id, Name, LastModifiedDate FROM ApexTrigger",
 }
+
+
+def _query_tooling(
+    org_alias: str, query: str, timeout: int
+) -> tuple[list[dict], str | None]:
+    """Run one Tooling-API SOQL query. Returns (records, error_message_or_None).
+
+    The records list is the raw `result.records` array from sf's --json output,
+    so callers can read whichever fields the query selected.
+    """
+    cmd = [
+        _sf_exe(), "data", "query",
+        "-q", query,
+        "--target-org", org_alias,
+        "--use-tooling-api",
+        "--json",
+    ]
+    logger.info("Tooling query: %s", query)
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return [], f"query timed out after {timeout}s"
+
+    try:
+        payload = json.loads(proc.stdout) if proc.stdout else {}
+    except json.JSONDecodeError:
+        return [], f"non-JSON response: {proc.stdout[-500:]!r}"
+
+    if payload.get("status") != 0:
+        return [], (
+            f"query failed status={payload.get('status')} "
+            f"name={payload.get('name')} message={payload.get('message')}"
+        )
+
+    return (payload.get("result") or {}).get("records") or [], None
+
+
+def _reconstruct_object_api_name(
+    developer_name: str | None, namespace_prefix: str | None
+) -> str | None:
+    """Rebuild the Salesforce-source api name from Tooling fields.
+
+    `CustomObject.DeveloperName` is the api name without the `__c` suffix and
+    without any managed-package namespace. So `Project_Task` becomes
+    `Project_Task__c`, and a namespaced one becomes `acme__Project_Task__c`.
+    """
+    if not developer_name:
+        return None
+    base = f"{developer_name}__c"
+    if namespace_prefix:
+        return f"{namespace_prefix}__{base}"
+    return base
+
+
+def _fetch_custom_object_inventory(
+    org_alias: str, timeout: int
+) -> tuple[list[OrgComponent], list[str]]:
+    """CustomObject inventory = max(object.LastModifiedDate, max field modified).
+
+    Two queries:
+      1. CustomObject — Id + DeveloperName + NamespacePrefix + LastModifiedDate.
+      2. CustomField — GROUP BY TableEnumOrId, MAX(LastModifiedDate). Caught
+         field-only changes that wouldn't bump the object's own row.
+
+    Standard objects (Account, Contact, Lead, etc.) don't appear in
+    `CustomObject` and are silently excluded — those need EntityDefinition
+    or full-retrieve, deferred to a future slice.
+    """
+    components: list[OrgComponent] = []
+    errors: list[str] = []
+
+    object_records, err = _query_tooling(
+        org_alias=org_alias,
+        query=(
+            "SELECT Id, DeveloperName, NamespacePrefix, LastModifiedDate "
+            "FROM CustomObject"
+        ),
+        timeout=timeout,
+    )
+    if err:
+        errors.append(f"CustomObject: {err}")
+        return components, errors
+
+    field_records, err = _query_tooling(
+        org_alias=org_alias,
+        query=(
+            "SELECT TableEnumOrId, MAX(LastModifiedDate) lmd "
+            "FROM CustomField "
+            "GROUP BY TableEnumOrId"
+        ),
+        timeout=timeout,
+    )
+    if err:
+        # Don't bail — proceed with object-only timestamps. Field-level edits
+        # may be missed this run, but the next refresh will catch them.
+        errors.append(f"CustomField aggregate: {err}")
+        field_records = []
+
+    field_max_by_parent_id: dict[str, str] = {}
+    for rec in field_records:
+        parent_id = rec.get("TableEnumOrId") or ""
+        # Aggregate functions in Tooling SOQL alias to lowercase by default.
+        lmd = rec.get("lmd") or rec.get("expr0") or ""
+        if parent_id and lmd:
+            field_max_by_parent_id[parent_id] = lmd
+
+    for rec in object_records:
+        api_name = _reconstruct_object_api_name(
+            rec.get("DeveloperName"), rec.get("NamespacePrefix")
+        )
+        if not api_name:
+            continue
+        obj_lmd = rec.get("LastModifiedDate") or ""
+        field_lmd = field_max_by_parent_id.get(rec.get("Id") or "", "")
+        # ISO-8601 lex compare; either string may be empty.
+        merged = max(obj_lmd, field_lmd)
+        if not merged:
+            continue
+        components.append(OrgComponent(
+            component_type="CustomObject",
+            api_name=api_name,
+            last_modified_at=merged,
+        ))
+
+    return components, errors
 
 
 def fetch_org_inventory(
@@ -100,6 +245,12 @@ def fetch_org_inventory(
     inventory = OrgInventory(types_queried=[t for t in component_types])
 
     for ctype in component_types:
+        if ctype == "CustomObject":
+            comps, errs = _fetch_custom_object_inventory(org_alias, timeout)
+            inventory.components.extend(comps)
+            inventory.errors.extend(errs)
+            continue
+
         query = _INVENTORY_QUERIES.get(ctype)
         if query is None:
             inventory.errors.append(
@@ -107,42 +258,11 @@ def fetch_org_inventory(
             )
             continue
 
-        cmd = [
-            _sf_exe(), "data", "query",
-            "-q", query,
-            "--target-org", org_alias,
-            "--use-tooling-api",
-            "--json",
-        ]
-        logger.info("Inventory: %s", " ".join(cmd))
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            inventory.errors.append(f"{ctype}: query timed out after {timeout}s")
+        records, err = _query_tooling(org_alias, query, timeout)
+        if err:
+            inventory.errors.append(f"{ctype}: {err}")
             continue
 
-        try:
-            payload = json.loads(proc.stdout) if proc.stdout else {}
-        except json.JSONDecodeError:
-            inventory.errors.append(
-                f"{ctype}: non-JSON response: {proc.stdout[-500:]!r}"
-            )
-            continue
-
-        if payload.get("status") != 0:
-            inventory.errors.append(
-                f"{ctype}: query failed status={payload.get('status')} "
-                f"name={payload.get('name')} message={payload.get('message')}"
-            )
-            continue
-
-        records = (payload.get("result") or {}).get("records") or []
         for rec in records:
             api_name = rec.get("Name")
             modified = rec.get("LastModifiedDate")

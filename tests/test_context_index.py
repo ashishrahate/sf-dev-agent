@@ -319,10 +319,13 @@ def test_build_index_cleans_up_retrieve_dir_on_success(
 
     monkeypatch.setattr("sf_dev_agent.context.retrieve", fake_retrieve)
 
+    # Drive the full-retrieve path explicitly — this test is about cleanup,
+    # not delta logic.
     result = build_index(
         org_alias="FakeOrg",
         db_path=db_path,
         retrieve_dir=retrieve_dir,
+        delta=False,
     )
     assert result.success
     assert result.components_indexed > 0
@@ -353,6 +356,7 @@ def test_build_index_keeps_retrieve_dir_on_failure(
         org_alias="FakeOrg",
         db_path=db_path,
         retrieve_dir=retrieve_dir,
+        delta=False,
     )
     assert not result.success
     assert (retrieve_dir / "marker.txt").exists(), \
@@ -383,6 +387,7 @@ def test_build_index_respects_cleanup_retrieve_false(
         db_path=db_path,
         retrieve_dir=retrieve_dir,
         cleanup_retrieve=False,
+        delta=False,
     )
     assert result.success
     assert retrieve_dir.exists(), "Retrieve dir should be preserved when cleanup is opted out"

@@ -100,6 +100,12 @@ from sf_dev_agent.paths import repo_root
 logger = logging.getLogger(__name__)
 
 
+# Component types whose children (FK parent_id) may be added or removed
+# between the org and the index. When delta-refresh re-fetches one of these,
+# we wipe its existing children first so deleted-on-org rows don't linger.
+_PARENT_TYPES: frozenset[str] = frozenset({"CustomObject"})
+
+
 @dataclass
 class IndexBuildResult:
     success: bool
@@ -369,6 +375,18 @@ def _build_index_delta(
         if plan.to_delete:
             with MetadataIndex(db_path) as index:
                 components_deleted = index.delete_components(plan.to_delete)
+
+        # Wipe stale children of parents we're about to re-fetch. A
+        # CustomObject that lost a field would otherwise leave that field's
+        # row behind as an orphan — the upsert can't see it disappear, only
+        # an explicit delete here can.
+        parents_being_refreshed = [
+            cid for cid in plan.to_fetch
+            if cid.split(":", 1)[0] in _PARENT_TYPES
+        ]
+        if parents_being_refreshed:
+            with MetadataIndex(db_path) as index:
+                index.delete_children_of(parents_being_refreshed)
 
         # Targeted retrieve.
         if plan.to_fetch:
