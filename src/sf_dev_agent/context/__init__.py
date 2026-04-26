@@ -75,6 +75,16 @@ from sf_dev_agent.context.index import (
     RelationshipEdge,
     SemanticSearchHit,
 )
+from sf_dev_agent.context.knowledge import (
+    KnowledgeBase,
+    KnowledgeEntry,
+    KnowledgeSearchHit,
+    bundled_entries_dir,
+)
+from sf_dev_agent.context.knowledge.store import (
+    KnowledgeEmbedResult,
+    KnowledgeIngestResult,
+)
 from sf_dev_agent.context.parsers import (
     ParsedComponent,
     ParsedRelationship,
@@ -475,6 +485,25 @@ def embed_index(
         )
 
 
+def embed_knowledge(
+    db_path: Path | str | None = None,
+    embedder: Embedder | None = None,
+    category: str | None = None,
+    force: bool = False,
+) -> KnowledgeEmbedResult:
+    """Auto-load bundled entries (if needed) and refresh embeddings.
+
+    Mirrors `embed_index` for the metadata side: hash-gated by default;
+    pass `force=True` to re-embed every entry (e.g. after switching models).
+    """
+    db_path = Path(db_path) if db_path else default_db_path()
+    if embedder is None:
+        embedder = create_embedder()
+    with KnowledgeBase(db_path) as kb:
+        kb.auto_load_if_empty()
+        return kb.embed_entries(embedder=embedder, category=category, force=force)
+
+
 __all__ = [
     "IndexBuildResult",
     "MetadataIndex",
@@ -486,6 +515,11 @@ __all__ = [
     "MockEmbedder",
     "create_embedder",
     "embed_index",
+    "embed_knowledge",
+    "KnowledgeBase",
+    "KnowledgeEntry",
+    "KnowledgeSearchHit",
+    "bundled_entries_dir",
     "DeltaPlan",
     "OrgComponent",
     "OrgInventory",

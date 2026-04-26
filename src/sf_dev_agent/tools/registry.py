@@ -34,6 +34,8 @@ _SF_TOOLS = frozenset({
     # intercepted in mock mode to avoid burning API quota on offline tests.
     "embed_metadata_index",
     "semantic_search",
+    "embed_knowledge_base",  # also calls Gemini embeddings
+    "knowledge_search",      # embeds the query via Gemini
 })
 
 
@@ -428,6 +430,87 @@ class ToolRegistry:
                 read_only=True,
             ),
             executor=self._exec_sf_dependency_graph,
+        )
+
+        # --- knowledge_search (vector search over the bundled knowledge base) ---
+        self.register(
+            ToolDefinition(
+                name="knowledge_search",
+                description=(
+                    "Vector-based search over the bundled Salesforce knowledge "
+                    "base — governor limits, anti-patterns, best practices, and "
+                    "architectural patterns. Use this when you need PLATFORM "
+                    "knowledge that's not org-specific: 'is SOQL in a loop OK?', "
+                    "'what's the heap size limit?', 'how should I structure "
+                    "trigger handlers?'. For org-specific code questions use "
+                    "code_search / semantic_search instead."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural-language description of what you want to know.",
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "governor_limit",
+                                "anti_pattern",
+                                "best_practice",
+                                "pattern",
+                            ],
+                            "description": "Restrict to one category. Omit for all.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default 5, max 25).",
+                            "default": 5,
+                        },
+                        "min_score": {
+                            "type": "number",
+                            "description": (
+                                "Drop results below this cosine-similarity "
+                                "threshold (0..1). Default 0 (return all top-k)."
+                            ),
+                            "default": 0.0,
+                        },
+                    },
+                    "required": ["query"],
+                },
+                read_only=True,
+            ),
+            executor=self._exec_knowledge_search,
+        )
+
+        # --- embed_knowledge_base (auto-loads + embeds bundled entries) ---
+        self.register(
+            ToolDefinition(
+                name="embed_knowledge_base",
+                description=(
+                    "Auto-load the bundled knowledge entries (if not already "
+                    "loaded) and populate/refresh their embeddings. "
+                    "Hash-gated — only re-embeds entries whose source text "
+                    "actually changed. Run once at session start when "
+                    "knowledge_search is going to be used; cheap to re-run."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "description": "Restrict to one category.",
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Re-embed even unchanged entries.",
+                            "default": False,
+                        },
+                    },
+                },
+                read_only=True,
+            ),
+            executor=self._exec_embed_knowledge_base,
         )
 
         # --- semantic_search (vector search over the metadata index) ---
@@ -965,6 +1048,124 @@ class ToolRegistry:
             "skipped_no_source": result.skipped_no_source,
             "errors": result.errors,
             "coverage": stats,
+        }
+
+    # ------------------------------------------------------------------
+    # Knowledge-base-backed tools
+    # ------------------------------------------------------------------
+
+    def _exec_embed_knowledge_base(
+        self,
+        category: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Auto-load bundled entries (if needed) and refresh embeddings."""
+        from sf_dev_agent.context import KnowledgeBase, create_embedder
+
+        try:
+            embedder = create_embedder()
+        except (ValueError, ImportError) as exc:
+            return {"error": f"Could not initialize embedder: {exc}"}
+
+        db_path = self._resolve_index_db_path()
+        with KnowledgeBase(db_path) as kb:
+            ingest = kb.auto_load_if_empty()
+            try:
+                embed_result = kb.embed_entries(
+                    embedder=embedder, category=category, force=force,
+                )
+            except Exception as exc:
+                return {"error": f"Embedding failed: {type(exc).__name__}: {exc}"}
+            stats = kb.embedding_stats()
+
+        return {
+            "embedder": embed_result.embedder_name,
+            "entries_loaded": ingest.loaded,
+            "entries_updated": ingest.updated,
+            "entries_skipped_unchanged": ingest.skipped_unchanged,
+            "embedded": embed_result.embedded,
+            "skipped_unchanged": embed_result.skipped_unchanged,
+            "errors": embed_result.errors + [
+                f"{path}: {err}" for path, err in ingest.parse_errors
+            ],
+            "coverage": stats,
+        }
+
+    def _exec_knowledge_search(
+        self,
+        query: str,
+        category: str | None = None,
+        limit: int = 5,
+        min_score: float = 0.0,
+    ) -> dict[str, Any]:
+        """Embed the query and rank knowledge entries by cosine similarity."""
+        from sf_dev_agent.context import KnowledgeBase, create_embedder
+
+        limit = max(1, min(limit, 25))
+
+        try:
+            try:
+                embedder = create_embedder(task_type="RETRIEVAL_QUERY")
+            except (TypeError, ValueError):
+                embedder = create_embedder()
+        except (ValueError, ImportError) as exc:
+            return {"error": f"Could not initialize embedder: {exc}"}
+
+        try:
+            query_vec = embedder.embed_one(query)
+        except Exception as exc:
+            return {"error": f"Embedding the query failed: {type(exc).__name__}: {exc}"}
+
+        db_path = self._resolve_index_db_path()
+        with KnowledgeBase(db_path) as kb:
+            kb.auto_load_if_empty()
+            hits = kb.search(
+                query_embedding=query_vec, category=category, limit=limit,
+            )
+
+        if not hits:
+            return {
+                "query": query,
+                "category": category,
+                "embedder": embedder.name,
+                "match_count": 0,
+                "results": [],
+                "note": (
+                    "No embedded knowledge entries to search. "
+                    "Run embed_knowledge_base first."
+                ),
+            }
+
+        filtered = [h for h in hits if h.score >= min_score]
+        if not filtered:
+            return {
+                "query": query,
+                "category": category,
+                "embedder": embedder.name,
+                "match_count": 0,
+                "best_score_below_threshold": hits[0].score,
+                "min_score": min_score,
+                "results": [],
+            }
+
+        return {
+            "query": query,
+            "category": category,
+            "embedder": embedder.name,
+            "match_count": len(filtered),
+            "results": [
+                {
+                    "id": h.entry.id,
+                    "title": h.entry.title,
+                    "category": h.entry.category,
+                    "severity": h.entry.severity,
+                    "tags": h.entry.tags,
+                    "references": h.entry.references,
+                    "body": h.entry.body,
+                    "score": round(h.score, 4),
+                }
+                for h in filtered
+            ],
         }
 
     def _exec_semantic_search(

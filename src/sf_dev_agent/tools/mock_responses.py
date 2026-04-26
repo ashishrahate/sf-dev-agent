@@ -255,5 +255,29 @@ def get_mock_response(tool_name: str, tool_input: dict[str, Any]) -> dict[str, A
             "note": "semantic_search skipped in mock-org mode",
         }
 
+    if tool_name == "embed_knowledge_base":
+        return {
+            "embedder": "mock:offline",
+            "entries_loaded": 0,
+            "entries_updated": 0,
+            "entries_skipped_unchanged": 0,
+            "embedded": 0,
+            "skipped_unchanged": 0,
+            "errors": [],
+            "coverage": {},
+            "mocked": True,
+            "note": "embed_knowledge_base skipped in mock-org mode",
+        }
+
+    if tool_name == "knowledge_search":
+        return {
+            "query": tool_input.get("query", ""),
+            "embedder": "mock:offline",
+            "match_count": 0,
+            "results": [],
+            "mocked": True,
+            "note": "knowledge_search skipped in mock-org mode",
+        }
+
     # Unknown SF tool — return a generic ok
     return {"status": 0, "result": {"mocked": True, "tool": tool_name}}

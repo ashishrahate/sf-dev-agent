@@ -53,3 +53,24 @@ CREATE TABLE IF NOT EXISTS index_runs (
     components_count  INTEGER NOT NULL DEFAULT 0,
     error             TEXT
 );
+
+-- Knowledge base — Salesforce platform knowledge that's NOT org-specific.
+-- Entries live as Markdown files in `knowledge/entries/<category>/*.md` and
+-- are auto-ingested into this table on first KnowledgeBase open.
+-- Uses the same embedding shape as `components` (BLOB + content hash gate).
+CREATE TABLE IF NOT EXISTS knowledge_entries (
+    id                    TEXT PRIMARY KEY,           -- e.g. "gl-soql-queries-101"
+    title                 TEXT NOT NULL,
+    category              TEXT NOT NULL,              -- governor_limit | anti_pattern | best_practice | pattern
+    severity              TEXT,                       -- critical | high | medium | low | info
+    tags_json             TEXT NOT NULL DEFAULT '[]', -- JSON array of strings
+    references_json       TEXT NOT NULL DEFAULT '[]', -- JSON array of URLs
+    body                  TEXT NOT NULL,              -- the Markdown body
+    file_path             TEXT,                       -- path on disk we ingested from
+    embedding             BLOB,                       -- float32 vector via .tobytes()
+    embedded_text_hash    TEXT,                       -- sha256 of the embedded text
+    last_loaded_at        TEXT NOT NULL               -- ISO-8601 UTC
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge_entries(category);
+CREATE INDEX IF NOT EXISTS idx_knowledge_severity ON knowledge_entries(severity);

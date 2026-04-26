@@ -98,6 +98,10 @@ class MetadataIndex:
 
         SQLite has no `ADD COLUMN IF NOT EXISTS`, so we attempt each ALTER and
         swallow the duplicate-column error. Cheap, correct, and never destroys data.
+
+        Also re-runs the schema script so newly-introduced tables (e.g.
+        knowledge_entries added in slice 3) appear on existing DBs without any
+        manual migration step from the user.
         """
         for stmt in (
             "ALTER TABLE components ADD COLUMN embedding BLOB",
