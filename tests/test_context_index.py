@@ -56,7 +56,9 @@ def fixture_tree(tmp_path: Path) -> Path:
            "}\n")
 
     # ApexTrigger — references the Account custom object that we ALSO ingest,
-    # so the relationship should resolve.
+    # AND calls into AccountHandler (also indexed) so a REFERENCES edge should
+    # resolve. The standard `Trigger.new` reference must NOT become an edge
+    # (Trigger is filtered as an Apex built-in).
     _write(base / "triggers" / "AccountTrigger.trigger",
            "trigger AccountTrigger on Account (before insert, after update) {\n"
            "    AccountHandler.handle(Trigger.new);\n"
@@ -151,10 +153,14 @@ def test_apex_trigger_parser_extracts_object_and_events(fixture_tree: Path) -> N
     assert "before insert" in trigger.metadata["events"]
     assert "after update" in trigger.metadata["events"]
 
-    assert len(result.relationships) == 1
-    rel = result.relationships[0]
-    assert rel.relationship_type == "TRIGGERS_ON"
-    assert rel.target_id == "CustomObject:Account"
+    triggers_on = [r for r in result.relationships if r.relationship_type == "TRIGGERS_ON"]
+    assert len(triggers_on) == 1
+    assert triggers_on[0].target_id == "CustomObject:Account"
+
+    # AccountHandler.handle(...) inside the trigger should produce a REFERENCES edge.
+    references = [r for r in result.relationships if r.relationship_type == "REFERENCES"]
+    targets = {r.target_id for r in references}
+    assert "ApexClass:AccountHandler" in targets
 
 
 def test_custom_object_parser_yields_object_and_fields(fixture_tree: Path) -> None:
@@ -215,6 +221,41 @@ def test_fields_of_account_returns_both_fields(built_index) -> None:
     fields = index.fields_of("Account")
     names = sorted(f.api_name for f in fields)
     assert names == ["External_Id__c", "Region__c"]
+
+
+def test_apex_trigger_emits_references_edge(built_index) -> None:
+    """AccountTrigger calls AccountHandler -> REFERENCES edge should resolve."""
+    index, _ = built_index
+    edges = index.relationships_of("ApexTrigger:AccountTrigger", direction="outgoing")
+    references = [e for e in edges if e.relationship_type == "REFERENCES"]
+    targets = {e.partner.api_name for e in references}
+    assert "AccountHandler" in targets, \
+        f"Expected REFERENCES edge to AccountHandler, got: {targets}"
+    # Trigger.new should NOT have produced an edge — Trigger is a built-in.
+    assert "Trigger" not in targets
+
+
+def test_apex_class_extends_does_not_double_count_as_reference(built_index) -> None:
+    """AccountHandlerExt extends AccountHandler — there should be exactly one
+    EXTENDS edge, not also a stray REFERENCES edge to the same target."""
+    index, _ = built_index
+    edges = index.relationships_of("ApexClass:AccountHandlerExt", direction="outgoing")
+    by_type = {}
+    for e in edges:
+        if e.partner.api_name == "AccountHandler":
+            by_type.setdefault(e.relationship_type, 0)
+            by_type[e.relationship_type] += 1
+    assert by_type.get("EXTENDS") == 1
+    assert by_type.get("REFERENCES", 0) == 0, \
+        "Parent class should be excluded from REFERENCES (already covered by EXTENDS)"
+
+
+def test_apex_class_metadata_includes_references_list(built_index) -> None:
+    """References extraction should also populate component.metadata.references."""
+    index, _ = built_index
+    trigger = index.find_by_id("ApexTrigger:AccountTrigger")
+    assert trigger is not None
+    assert "AccountHandler" in trigger.metadata.get("references", [])
 
 
 def test_relationship_to_unindexed_object_is_skipped(built_index) -> None:

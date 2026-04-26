@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from sf_dev_agent.context.parsers._apex_refs import extract_class_references
 from sf_dev_agent.context.parsers.base import (
     ParsedComponent,
     ParsedRelationship,
@@ -58,12 +59,23 @@ class ApexClassParser(Parser):
         ]
 
         component_id = self.make_id("ApexClass", api_name)
+
+        # Class references — used for REFERENCES edges and stored as metadata.
+        # Suppress self-reference and the parent/interface names already covered
+        # by EXTENDS / IMPLEMENTS edges.
+        suppress = {api_name}
+        if parent:
+            suppress.add(parent)
+        suppress.update(interfaces)
+        references = sorted(extract_class_references(source, exclude=suppress))
+
         metadata = {
             "sharing_model": sharing or None,
             "extends": parent,
             "implements": interfaces,
             "is_test": bool(_IS_TEST.search(source)),
             "line_count": source.count("\n") + 1,
+            "references": references,
         }
 
         component = ParsedComponent(
@@ -87,6 +99,12 @@ class ApexClassParser(Parser):
                 source_id=component_id,
                 target_id=self.make_id("ApexClass", iface),
                 relationship_type="IMPLEMENTS",
+            ))
+        for ref in references:
+            relationships.append(ParsedRelationship(
+                source_id=component_id,
+                target_id=self.make_id("ApexClass", ref),
+                relationship_type="REFERENCES",
             ))
 
         return ParseResult(components=[component], relationships=relationships)

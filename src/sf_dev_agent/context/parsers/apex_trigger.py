@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from sf_dev_agent.context.parsers._apex_refs import extract_class_references
 from sf_dev_agent.context.parsers.base import (
     ParsedComponent,
     ParsedRelationship,
@@ -54,6 +55,13 @@ class ApexTriggerParser(Parser):
         events = [e.strip().lower() for e in match.group("events").split(",") if e.strip()]
 
         component_id = self.make_id("ApexTrigger", api_name)
+
+        # Suppress the trigger's own name and the target sObject (already
+        # captured as a TRIGGERS_ON edge / metadata field).
+        references = sorted(extract_class_references(
+            source, exclude={api_name, target_object}
+        ))
+
         component = ParsedComponent(
             id=component_id,
             component_type="ApexTrigger",
@@ -64,17 +72,24 @@ class ApexTriggerParser(Parser):
                 "target_object": target_object,
                 "events": events,
                 "line_count": source.count("\n") + 1,
+                "references": references,
             },
         )
 
-        relationship = ParsedRelationship(
+        relationships: list[ParsedRelationship] = [ParsedRelationship(
             source_id=component_id,
             target_id=self.make_id("CustomObject", target_object),
             relationship_type="TRIGGERS_ON",
             metadata={"events": events},
-        )
+        )]
+        for ref in references:
+            relationships.append(ParsedRelationship(
+                source_id=component_id,
+                target_id=self.make_id("ApexClass", ref),
+                relationship_type="REFERENCES",
+            ))
 
-        return ParseResult(components=[component], relationships=[relationship])
+        return ParseResult(components=[component], relationships=relationships)
 
 
 register(ApexTriggerParser())
