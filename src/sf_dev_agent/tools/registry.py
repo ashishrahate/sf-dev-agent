@@ -14,6 +14,7 @@ import json
 import logging
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Callable
 
 from sf_dev_agent.models.schemas import OrgConnection, ToolDefinition
@@ -28,15 +29,22 @@ _SF_TOOLS = frozenset({
     "sf_retrieve",
     "sf_source_deploy",
     "sf_test_run",
+    "build_metadata_index",  # also hits the org via sf project retrieve
 })
 
 
 class ToolRegistry:
     """Manages tool schemas and executors for the agent."""
 
-    def __init__(self, org: OrgConnection, mock_org: bool = False) -> None:
+    def __init__(
+        self,
+        org: OrgConnection,
+        mock_org: bool = False,
+        index_db_path: Path | None = None,
+    ) -> None:
         self.org = org
         self.mock_org = mock_org
+        self.index_db_path = index_db_path  # None -> default location resolved lazily
         self._tools: dict[str, ToolDefinition] = {}
         self._executors: dict[str, Callable[..., Any]] = {}
 
@@ -330,6 +338,123 @@ class ToolRegistry:
             executor=self._exec_bash,
         )
 
+        # --- code_search (metadata index) ---
+        self.register(
+            ToolDefinition(
+                name="code_search",
+                description=(
+                    "Search the local SQLite metadata index for components by name "
+                    "or source-text substring. Cheap and deterministic — prefer this "
+                    "over sf_metadata_describe / sf_retrieve when answering 'what "
+                    "exists?' questions. Returns id, type, api_name, and a metadata "
+                    "summary; pass include_source=true to include the full source "
+                    "(can be large). Build the index first with build_metadata_index "
+                    "if it's empty."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Substring to match against api_name and source.",
+                        },
+                        "component_type": {
+                            "type": "string",
+                            "description": (
+                                "Restrict to one type (ApexClass, ApexTrigger, "
+                                "CustomObject, CustomField, ...). Omit for all types."
+                            ),
+                        },
+                        "include_source": {
+                            "type": "boolean",
+                            "description": "Include full source text in results (default false).",
+                            "default": False,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results to return (default 25, max 100).",
+                            "default": 25,
+                        },
+                    },
+                    "required": ["query"],
+                },
+                read_only=True,
+            ),
+            executor=self._exec_code_search,
+        )
+
+        # --- sf_dependency_graph (metadata index) ---
+        self.register(
+            ToolDefinition(
+                name="sf_dependency_graph",
+                description=(
+                    "Return the relationship edges touching a component in the local "
+                    "metadata index — what it triggers on, what fields it has, what "
+                    "it extends/implements, and what depends on it. Use this to "
+                    "understand the blast radius of a change before modifying a "
+                    "component."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "component_id": {
+                            "type": "string",
+                            "description": (
+                                "Canonical id like 'ApexTrigger:AccountTrigger' or "
+                                "'CustomObject:Account'. If you only have a name, "
+                                "use component_type + api_name instead."
+                            ),
+                        },
+                        "component_type": {
+                            "type": "string",
+                            "description": "Used with api_name when component_id is unknown.",
+                        },
+                        "api_name": {
+                            "type": "string",
+                            "description": "Used with component_type when component_id is unknown.",
+                        },
+                        "direction": {
+                            "type": "string",
+                            "enum": ["outgoing", "incoming", "both"],
+                            "description": "Which edges to return (default both).",
+                            "default": "both",
+                        },
+                    },
+                },
+                read_only=True,
+            ),
+            executor=self._exec_sf_dependency_graph,
+        )
+
+        # --- build_metadata_index (refreshes local SQLite from live org) ---
+        self.register(
+            ToolDefinition(
+                name="build_metadata_index",
+                description=(
+                    "Refresh the local SQLite metadata index from the connected org. "
+                    "Read-only against the org (uses sf project retrieve start). Run "
+                    "this once at session start, after deploys, or when the index "
+                    "looks stale. Currently indexes ApexClass, ApexTrigger, "
+                    "CustomObject (and their CustomFields)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "component_types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Restrict the refresh to these types (default: all "
+                                "supported types). Useful for fast post-deploy refreshes."
+                            ),
+                        },
+                    },
+                },
+                read_only=True,
+            ),
+            executor=self._exec_build_metadata_index,
+        )
+
         # --- submit_plan ---
         # Schema exposed to the LLM; execution is intercepted by AgentLoop
         # before it reaches this registry — this executor is never called.
@@ -560,3 +685,138 @@ class ToolRegistry:
             }
         except subprocess.TimeoutExpired:
             return {"error": f"Command timed out after {timeout}s"}
+
+    # ------------------------------------------------------------------
+    # Metadata-index-backed tools
+    # ------------------------------------------------------------------
+
+    def _resolve_index_db_path(self) -> Path:
+        """Return the configured DB path, or the package default."""
+        if self.index_db_path:
+            return self.index_db_path
+        from sf_dev_agent.context import default_db_path
+        return default_db_path()
+
+    def _index_missing_response(self, db_path: Path) -> dict[str, Any]:
+        return {
+            "error": (
+                f"Metadata index not found at {db_path}. "
+                "Build it first by calling the build_metadata_index tool."
+            ),
+            "components": [],
+            "components_indexed": 0,
+        }
+
+    @staticmethod
+    def _component_summary(comp: Any, include_source: bool = False) -> dict[str, Any]:
+        """Pack a ComponentRow into a compact dict for tool output."""
+        out = {
+            "id": comp.id,
+            "component_type": comp.component_type,
+            "api_name": comp.api_name,
+            "parent_id": comp.parent_id,
+            "metadata": comp.metadata,
+            "last_indexed_at": comp.last_indexed_at,
+        }
+        if include_source and comp.source is not None:
+            out["source"] = comp.source
+        return out
+
+    def _exec_code_search(
+        self,
+        query: str,
+        component_type: str | None = None,
+        include_source: bool = False,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        """Substring search across the metadata index."""
+        from sf_dev_agent.context import MetadataIndex
+
+        db_path = self._resolve_index_db_path()
+        if not db_path.exists():
+            return self._index_missing_response(db_path)
+
+        limit = max(1, min(limit, 100))
+        with MetadataIndex(db_path) as index:
+            hits = index.search(query, component_type=component_type, limit=limit)
+            return {
+                "query": query,
+                "component_type": component_type,
+                "match_count": len(hits),
+                "results": [self._component_summary(h, include_source) for h in hits],
+            }
+
+    def _exec_sf_dependency_graph(
+        self,
+        component_id: str | None = None,
+        component_type: str | None = None,
+        api_name: str | None = None,
+        direction: str = "both",
+    ) -> dict[str, Any]:
+        """Return relationship edges for one component."""
+        from sf_dev_agent.context import MetadataIndex
+
+        if direction not in ("outgoing", "incoming", "both"):
+            return {"error": f"Invalid direction: {direction!r}"}
+
+        db_path = self._resolve_index_db_path()
+        if not db_path.exists():
+            return self._index_missing_response(db_path)
+
+        with MetadataIndex(db_path) as index:
+            # Resolve the target component first.
+            if component_id:
+                target = index.find_by_id(component_id)
+            elif component_type and api_name:
+                matches = index.find_by_name(api_name, component_type=component_type)
+                target = matches[0] if matches else None
+            else:
+                return {"error": "Provide either component_id or component_type+api_name"}
+
+            if target is None:
+                return {
+                    "error": "Component not found in index",
+                    "component_id": component_id,
+                    "component_type": component_type,
+                    "api_name": api_name,
+                }
+
+            edges = index.relationships_of(target.id, direction=direction)
+            return {
+                "component": self._component_summary(target),
+                "direction": direction,
+                "edge_count": len(edges),
+                "edges": [
+                    {
+                        "direction": e.direction,
+                        "relationship_type": e.relationship_type,
+                        "partner": self._component_summary(e.partner),
+                        "metadata": e.metadata,
+                    }
+                    for e in edges
+                ],
+            }
+
+    def _exec_build_metadata_index(
+        self,
+        component_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Refresh the SQLite metadata index from the connected org."""
+        from sf_dev_agent.context import build_index
+
+        db_path = self._resolve_index_db_path()
+        result = build_index(
+            org_alias=self.org.org_alias,
+            db_path=db_path,
+            component_types=component_types,
+        )
+        return {
+            "success": result.success,
+            "db_path": str(result.db_path),
+            "components_indexed": result.components_indexed,
+            "relationships_indexed": result.relationships_indexed,
+            "relationships_skipped": result.relationships_skipped,
+            "parser_errors": result.parser_errors,
+            "retrieve_error": result.retrieve_error,
+            "component_types": result.component_types,
+        }

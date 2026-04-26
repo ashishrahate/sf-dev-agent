@@ -47,6 +47,20 @@ class ComponentRow:
     last_indexed_at: str
 
 
+@dataclass
+class RelationshipEdge:
+    """A graph edge with the partner component hydrated for the caller's perspective.
+
+    `direction` is "outgoing" when the queried component is the source of the edge
+    (e.g. AccountTrigger TRIGGERS_ON Account), "incoming" when it's the target
+    (e.g. Account is referenced BY AccountTrigger).
+    """
+    direction: str                 # "outgoing" | "incoming"
+    relationship_type: str
+    partner: ComponentRow
+    metadata: dict[str, Any]
+
+
 class MetadataIndex:
     """Read/write interface to the SQLite metadata index."""
 
@@ -221,6 +235,59 @@ class MetadataIndex:
                 (like, like, limit),
             ).fetchall()
         return [_row_to_component(r) for r in rows]
+
+    def relationships_of(
+        self,
+        component_id: str,
+        direction: str = "both",
+    ) -> list[RelationshipEdge]:
+        """Return graph edges touching `component_id`.
+
+        direction = "outgoing" -> only edges where component is the source
+        direction = "incoming" -> only edges where component is the target
+        direction = "both"     -> both, with `RelationshipEdge.direction` set
+        """
+        edges: list[RelationshipEdge] = []
+
+        if direction in ("outgoing", "both"):
+            rows = self._conn.execute(
+                """
+                SELECT r.relationship_type, r.metadata_json, c.*
+                FROM relationships r
+                JOIN components c ON c.id = r.target_id
+                WHERE r.source_id = ?
+                ORDER BY r.relationship_type, c.api_name
+                """,
+                (component_id,),
+            ).fetchall()
+            for row in rows:
+                edges.append(RelationshipEdge(
+                    direction="outgoing",
+                    relationship_type=row["relationship_type"],
+                    partner=_row_to_component(row),
+                    metadata=json.loads(row["metadata_json"] or "{}"),
+                ))
+
+        if direction in ("incoming", "both"):
+            rows = self._conn.execute(
+                """
+                SELECT r.relationship_type, r.metadata_json, c.*
+                FROM relationships r
+                JOIN components c ON c.id = r.source_id
+                WHERE r.target_id = ?
+                ORDER BY r.relationship_type, c.api_name
+                """,
+                (component_id,),
+            ).fetchall()
+            for row in rows:
+                edges.append(RelationshipEdge(
+                    direction="incoming",
+                    relationship_type=row["relationship_type"],
+                    partner=_row_to_component(row),
+                    metadata=json.loads(row["metadata_json"] or "{}"),
+                ))
+
+        return edges
 
     def stats(self) -> dict[str, int]:
         rows = self._conn.execute(

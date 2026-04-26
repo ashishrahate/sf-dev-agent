@@ -221,5 +221,17 @@ def get_mock_response(tool_name: str, tool_input: dict[str, Any]) -> dict[str, A
     if tool_name == "sf_test_run":
         return TEST_RUN_SUCCESS
 
+    if tool_name == "build_metadata_index":
+        return {
+            "success": True,
+            "components_indexed": 0,
+            "relationships_indexed": 0,
+            "relationships_skipped": 0,
+            "parser_errors": [],
+            "retrieve_error": None,
+            "mocked": True,
+            "note": "build_metadata_index skipped in mock-org mode",
+        }
+
     # Unknown SF tool — return a generic ok
     return {"status": 0, "result": {"mocked": True, "tool": tool_name}}

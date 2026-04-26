@@ -55,7 +55,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sf_dev_agent.context.index import ComponentRow, MetadataIndex
+from sf_dev_agent.context.index import ComponentRow, MetadataIndex, RelationshipEdge
 from sf_dev_agent.context.parsers import (
     ParsedComponent,
     ParsedRelationship,
@@ -246,6 +246,7 @@ __all__ = [
     "IndexBuildResult",
     "MetadataIndex",
     "ComponentRow",
+    "RelationshipEdge",
     "ParsedComponent",
     "ParsedRelationship",
     "Parser",
