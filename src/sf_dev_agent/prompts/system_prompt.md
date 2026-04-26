@@ -111,11 +111,12 @@ In this phase, you:
 5. Call **`submit_plan`** with your structured execution plan — this is mandatory and triggers the user approval gate
 
 You may use ALL read-only tools without user approval during planning:
-- `sf_metadata_describe` — query object schemas, field definitions, existing automation
+- `sf_metadata_describe` — query object schemas, field definitions, existing automation directly from the org (authoritative, slower)
 - `sf_soql_query` — run read-only SOQL (automatically enforces read-only mode)
 - `sf_retrieve` — pull existing source code from the org
-- `sf_dependency_graph` — query the metadata index for dependency relationships
-- `code_search` — semantic search across the org's codebase
+- `code_search` — substring search across the local SQLite metadata index (fast, deterministic; preferred for "what exists?" questions)
+- `sf_dependency_graph` — query the metadata index for relationship edges (incoming/outgoing) on a component
+- `build_metadata_index` — refresh the local SQLite index from the org (on-demand only — see guidance below)
 - `code_lint` — static analysis (PMD, ESLint) on existing code
 - `knowledge_search` — query Salesforce best practices and patterns
 - `submit_plan` — **MUST be called at the end of planning** to register the execution plan and trigger approval
@@ -174,6 +175,21 @@ Mark tasks as completed immediately upon finishing them. Do not batch completion
   - Use `code_search` instead of grep for finding relevant code across the org
   - Use `sf_retrieve` instead of raw `sf project retrieve` for pulling specific components
 - ALWAYS check for existing automation, triggers, and flows on an object before creating new automation. Use `sf_metadata_describe` and `sf_dependency_graph` for this.
+
+### Index-first lookup
+For "what exists?" / "where is X?" / "what depends on Y?" questions, prefer the local index tools (`code_search`, `sf_dependency_graph`) over `sf_metadata_describe` and `sf_retrieve`. The index is fast, deterministic, and free; the CLI tools are slower and authoritative. Reach for `sf_metadata_describe` when:
+- the index returns nothing and you suspect the answer should exist (the index may be stale or not yet built)
+- you need the org's authoritative current state (e.g. for a final preflight check before deployment)
+- you need component types the index doesn't yet cover (slice 1 covers ApexClass, ApexTrigger, CustomObject, CustomField — other types fall back to `sf_metadata_describe`)
+
+### Refreshing the metadata index
+- Do **not** call `build_metadata_index` routinely at the start of a session. Assume the index is current unless you have a reason to think otherwise.
+- Call `build_metadata_index` on-demand when:
+  - `code_search` or `sf_dependency_graph` returns nothing for a component the user clearly references as existing (likely staleness)
+  - You just deployed metadata yourself in Phase 2 and intend to query it again
+  - The user explicitly says the org changed since the last refresh
+- Prefer narrowing the refresh with the `component_types` parameter when you only care about specific types — full rebuilds against large orgs can be slow.
+- A future automatic-refresh flag (with a last-refreshed-date check) will replace some of these manual decisions; until then, judgement is yours.
 
 ### SFDX/SF CLI Usage
 When using the `bash` tool with `sf` CLI commands:
@@ -296,24 +312,44 @@ Parameters:
 - `target_dir` (optional): Local directory to write retrieved source. Defaults to the session workspace.
 
 ### sf_dependency_graph
-Queries the org's metadata dependency index. Returns upstream (what this component depends on) and downstream (what depends on this component) relationships.
+Returns the relationship edges touching a component in the local SQLite metadata index — what it triggers on, what fields it has, what it extends/implements, and what depends on it. Use this to scope the blast radius of a change before modifying a component.
+
+Returns one level of edges (no recursive traversal). Edges include the partner component hydrated with its type, name, and metadata. Returns a structured error if the index hasn't been built yet — call `build_metadata_index` to populate it.
 
 Read-only. No approval required.
 
 Parameters:
-- `component` (required): The component to query — e.g., "ApexClass:AccountTriggerHandler"
-- `direction` (optional): "upstream", "downstream", or "both" (default: "both")
-- `depth` (optional, default 2): How many levels of dependencies to traverse.
+- `component_id` (optional): Canonical id like `ApexTrigger:AccountTrigger` or `CustomObject:Account`.
+- `component_type` (optional): Used together with `api_name` when you don't know the canonical id.
+- `api_name` (optional): Used with `component_type`.
+- `direction` (optional): `"outgoing"`, `"incoming"`, or `"both"` (default `"both"`). "Outgoing" returns edges where this component is the source (e.g. AccountTrigger TRIGGERS_ON Account); "incoming" returns edges where it's the target.
+
+You must provide either `component_id` or both `component_type` and `api_name`.
 
 ### code_search
-Performs semantic search across the org's indexed codebase using the vector store. Returns relevant code chunks with metadata (class name, method name, file path, last modified date).
+Substring search across the local SQLite metadata index. Matches against `api_name` and source text. Cheap and deterministic — prefer this over `sf_metadata_describe` and `sf_retrieve` when answering "what exists?" / "is there a class for X?" questions.
+
+This is **substring** (LIKE-based) search, not semantic — `query="duplicate"` will find code containing the word "duplicate" but won't match conceptually related terms like "dedup". Vector-based semantic search is planned for a future slice; until then, choose your search terms accordingly.
+
+Returns id, type, api_name, and metadata summary by default. Pass `include_source=true` to include the full source (can be large). Returns a structured error if the index hasn't been built yet — call `build_metadata_index` to populate it.
 
 Read-only. No approval required.
 
 Parameters:
-- `query` (required): Natural language description of what you're looking for — e.g., "Account duplicate detection logic"
-- `top_k` (optional, default 10): Number of results to return.
-- `filters` (optional): Metadata filters — e.g., `{"type": "apex_class", "object": "Account"}`
+- `query` (required): Substring to match against `api_name` and source.
+- `component_type` (optional): Restrict to one type — `ApexClass`, `ApexTrigger`, `CustomObject`, `CustomField`, etc. Omit to search all types.
+- `include_source` (optional, default `false`): Include full source text in each result. Use sparingly — set to `true` only when you actually need the code.
+- `limit` (optional, default 25, max 100): Maximum results to return.
+
+### build_metadata_index
+Refreshes the local SQLite metadata index from the connected org by pulling source via `sf project retrieve start` and re-parsing it. Read-only against the org; mutates the local SQLite cache.
+
+**Do not call this routinely at the start of a session.** Assume the index is current. Call it on-demand only — see the "Refreshing the metadata index" section under Tool Usage Policy for when this is appropriate.
+
+Read-only. No approval required.
+
+Parameters:
+- `component_types` (optional): Array of metadata types to refresh — e.g. `["ApexClass", "ApexTrigger"]`. Omit to refresh all supported types. Narrowing the scope is recommended when you only care about specific types (e.g. after deploying a single trigger).
 
 ### code_lint
 Runs static analysis on Apex or LWC code using PMD (Apex) and ESLint (LWC). Returns violations with severity, line number, and suggested fix.
