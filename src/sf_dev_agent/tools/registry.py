@@ -36,6 +36,7 @@ _SF_TOOLS = frozenset({
     "semantic_search",
     "embed_knowledge_base",  # also calls Gemini embeddings
     "knowledge_search",      # embeds the query via Gemini
+    "retrieve_context",      # fans out to vector layers; embeds the query via Gemini
 })
 
 
@@ -342,6 +343,86 @@ class ToolRegistry:
                 read_only=False,
             ),
             executor=self._exec_bash,
+        )
+
+        # --- retrieve_context (orchestrator: all three layers in one call) ---
+        self.register(
+            ToolDefinition(
+                name="retrieve_context",
+                description=(
+                    "PREFERRED for open-ended exploration. One call fans out "
+                    "to all three context layers (semantic + literal code "
+                    "search + knowledge base), graph-enriches the top code "
+                    "hits, dedupes, and returns a focused token-budgeted "
+                    "payload with provenance.\n\n"
+                    "Use this when the question is broad ('what do we know "
+                    "about duplicate detection?', 'how should I structure "
+                    "the trigger handler?') and you don't yet know which "
+                    "layer holds the answer.\n\n"
+                    "When you DO know the layer (a literal id lookup, a "
+                    "specific dependency walk, or a targeted governor-limit "
+                    "lookup), the per-layer tools (code_search, "
+                    "sf_dependency_graph, semantic_search, knowledge_search) "
+                    "are cheaper and more precise. Costs one Gemini "
+                    "embedding call (the query is embedded once and reused "
+                    "across vector layers)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural-language description of the context you need.",
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "description": (
+                                "Total token budget for the assembled "
+                                "payload (default 4000)."
+                            ),
+                            "default": 4000,
+                        },
+                        "max_per_layer": {
+                            "type": "integer",
+                            "description": (
+                                "Per-layer hit cap before dedupe "
+                                "(default 6). Higher values cast a wider "
+                                "net but eat more of the budget."
+                            ),
+                            "default": 6,
+                        },
+                        "enrich_top_k": {
+                            "type": "integer",
+                            "description": (
+                                "Number of top code hits to graph-enrich "
+                                "with one-hop relationship edges. Default "
+                                "3; pass 0 to disable."
+                            ),
+                            "default": 3,
+                        },
+                        "component_type": {
+                            "type": "string",
+                            "description": (
+                                "Restrict semantic + literal layers to "
+                                "this component type. Omit for all."
+                            ),
+                        },
+                        "knowledge_category": {
+                            "type": "string",
+                            "enum": [
+                                "governor_limit",
+                                "anti_pattern",
+                                "best_practice",
+                                "pattern",
+                            ],
+                            "description": "Restrict knowledge layer to one category.",
+                        },
+                    },
+                    "required": ["query"],
+                },
+                read_only=True,
+            ),
+            executor=self._exec_retrieve_context,
         )
 
         # --- code_search (metadata index) ---
@@ -1167,6 +1248,33 @@ class ToolRegistry:
                 for h in filtered
             ],
         }
+
+    def _exec_retrieve_context(
+        self,
+        query: str,
+        max_tokens: int = 4000,
+        max_per_layer: int = 6,
+        enrich_top_k: int = 3,
+        component_type: str | None = None,
+        knowledge_category: str | None = None,
+    ) -> dict[str, Any]:
+        """Fan out to all three context layers, dedupe, graph-enrich, budget-trim."""
+        from sf_dev_agent.context import retrieve_context
+
+        db_path = self._resolve_index_db_path()
+        if not db_path.exists():
+            return self._index_missing_response(db_path)
+
+        result = retrieve_context(
+            query=query,
+            db_path=db_path,
+            max_tokens=max_tokens,
+            max_per_layer=max_per_layer,
+            enrich_top_k=enrich_top_k,
+            component_type=component_type,
+            knowledge_category=knowledge_category,
+        )
+        return result.to_dict()
 
     def _exec_semantic_search(
         self,

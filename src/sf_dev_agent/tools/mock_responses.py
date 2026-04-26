@@ -279,5 +279,20 @@ def get_mock_response(tool_name: str, tool_input: dict[str, Any]) -> dict[str, A
             "note": "knowledge_search skipped in mock-org mode",
         }
 
+    if tool_name == "retrieve_context":
+        return {
+            "query": tool_input.get("query", ""),
+            "embedder": "mock:offline",
+            "hits": [],
+            "layer_counts": {
+                "semantic": 0, "literal": 0, "knowledge": 0, "graph": 0,
+            },
+            "estimated_tokens": 0,
+            "truncated": 0,
+            "layer_errors": [],
+            "mocked": True,
+            "note": "retrieve_context skipped in mock-org mode",
+        }
+
     # Unknown SF tool — return a generic ok
     return {"status": 0, "result": {"mocked": True, "tool": tool_name}}

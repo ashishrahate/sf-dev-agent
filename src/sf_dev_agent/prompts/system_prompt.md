@@ -111,6 +111,7 @@ In this phase, you:
 5. Call **`submit_plan`** with your structured execution plan — this is mandatory and triggers the user approval gate
 
 You may use ALL read-only tools without user approval during planning:
+- `retrieve_context` — **PREFERRED for open-ended exploration.** One call fans out to all three context layers (semantic + literal code + knowledge base), graph-enriches the top code hits, dedupes, and returns a focused token-budgeted payload. Use this when the question is broad and you don't yet know which layer holds the answer.
 - `sf_metadata_describe` — query object schemas, field definitions, existing automation directly from the org (authoritative, slower)
 - `sf_soql_query` — run read-only SOQL (automatically enforces read-only mode)
 - `sf_retrieve` — pull existing source code from the org
@@ -194,6 +195,21 @@ Reach for `sf_metadata_describe` / `sf_retrieve` only when one of these is true:
 - you need the org's authoritative current state (e.g. final preflight before deployment)
 - you need component types the index doesn't yet cover (current parsers: ApexClass, ApexTrigger, CustomObject, CustomField — other types fall back to the CLI tools)
 
+### `retrieve_context` vs the per-layer tools
+`retrieve_context` is the orchestrator. One call hits all three layers (semantic, literal code, knowledge), graph-enriches the top code hits, dedupes by component, and returns one token-budgeted payload with provenance. The per-layer tools (`code_search`, `semantic_search`, `sf_dependency_graph`, `knowledge_search`) are still available for when you already know the layer.
+
+Default to `retrieve_context` when:
+- the user's question is broad ("what do we know about duplicate detection?", "how should I structure the trigger handler?")
+- you are about to start exploring and don't yet know whether the answer is in the code, the graph, or the platform reference
+- you want one call instead of three
+
+Reach for the per-layer tools when:
+- you have a literal id and want a single targeted lookup (`code_search` / `find_by_id`)
+- you are walking dependencies from a known anchor (`sf_dependency_graph`)
+- the question is purely about platform knowledge with no org-side angle (`knowledge_search`)
+
+`retrieve_context` costs exactly one Gemini embedding call (the query is embedded once and reused across vector layers), so it's not appreciably more expensive than `semantic_search` alone.
+
 ### Choosing between `code_search` and `semantic_search`
 - **`code_search`** — literal/substring match against `api_name` and source. Use when the user gave you an exact name, a specific identifier, or a fragment of code you want to grep for. Cheap (no embedding API call).
 - **`semantic_search`** — concept-based ranking by cosine similarity. Use when the user described a *behavior* or *purpose* rather than a name: "duplicate detection", "tax logic", "lead routing", "the class that handles invoice approvals". Costs one embedding API call per query.
@@ -211,10 +227,9 @@ Use `knowledge_search` when:
 The knowledge base is bundled with the agent and never goes stale relative to the org. Run `embed_knowledge_base` once at session start (it's hash-gated and cheap to re-run), then `knowledge_search` is free of build-step setup.
 
 A typical pre-plan flow for a non-trivial Apex change:
-1. `code_search` / `semantic_search` — what already exists in the org?
-2. `sf_dependency_graph` — what depends on the components I'd touch?
-3. `knowledge_search` — what's the canonical pattern for this kind of change, and what limits should I respect?
-4. `submit_plan` — propose with that grounding visible.
+1. `retrieve_context(query="<one-line description of the change>")` — pulls org code (semantic + literal), 1-hop dependency edges, and applicable platform knowledge in one call.
+2. If the orchestrator's payload left a specific question open, drill in with the per-layer tool that fits (`code_search` for an exact id, `sf_dependency_graph` for a deeper graph walk, `knowledge_search` for an additional category lookup).
+3. `submit_plan` — propose with the orchestrator's hits as visible grounding.
 
 ### Refreshing the metadata index
 - Do **not** call `build_metadata_index` routinely at the start of a session. Assume the index is current unless you have a reason to think otherwise.
@@ -344,6 +359,25 @@ Read-only. No approval required.
 Parameters:
 - `components` (required): Array of metadata component identifiers — e.g., ["ApexClass:AccountTriggerHandler", "ApexTrigger:AccountTrigger", "LightningComponentBundle:accountForm"]
 - `target_dir` (optional): Local directory to write retrieved source. Defaults to the session workspace.
+
+### retrieve_context
+The Retrieval Orchestrator. One call queries all three context layers in parallel — the vector store (semantic over org components), the metadata index (literal substring), and the knowledge base (curated Salesforce expertise) — graph-enriches the top code hits with their 1-hop relationship edges, dedupes by `component_id`, normalizes scores, and trims the merged set to a token budget.
+
+Default to this tool for open-ended exploration. The per-layer tools (`code_search`, `semantic_search`, `sf_dependency_graph`, `knowledge_search`) remain available for targeted lookups when you already know which layer holds the answer.
+
+Each hit in the response carries a `source` field (`semantic` / `literal` / `knowledge` / `graph`) so you can see which layer surfaced it, plus a `citation` you can quote in your plan. When the same component is surfaced by both semantic + literal layers, it collapses to a single hit and the loser is recorded under `metadata.also_surfaced_by` (a strong cross-layer agreement signal).
+
+Costs exactly one Gemini embedding API call per invocation (the query is embedded once and reused across vector layers). Returns a structured error if the index hasn't been built yet — call `build_metadata_index` to populate it. The orchestrator surfaces per-layer errors under `layer_errors` without aborting — a knowledge-base failure won't block code hits from other layers.
+
+Read-only. No approval required.
+
+Parameters:
+- `query` (required): Natural-language description of the context you need.
+- `max_tokens` (optional, default 4000): Total token budget for the assembled payload. Larger values pull in more context at higher cost.
+- `max_per_layer` (optional, default 6): Per-layer hit cap *before* dedupe. Higher values cast a wider net but eat more of the budget.
+- `enrich_top_k` (optional, default 3): Number of top code hits to graph-enrich with one-hop relationship edges. Pass `0` to disable graph enrichment.
+- `component_type` (optional): Restrict semantic + literal layers to this component type. Knowledge layer is unaffected.
+- `knowledge_category` (optional): Restrict knowledge layer to one of `governor_limit`, `anti_pattern`, `best_practice`, `pattern`.
 
 ### sf_dependency_graph
 Returns the relationship edges touching a component in the local SQLite metadata index — what it triggers on, what fields it has, what it extends/implements, and what depends on it. Use this to scope the blast radius of a change before modifying a component.

@@ -85,6 +85,11 @@ from sf_dev_agent.context.knowledge.store import (
     KnowledgeEmbedResult,
     KnowledgeIngestResult,
 )
+from sf_dev_agent.context.orchestrator import (
+    ContextHit,
+    RetrievalResult,
+    retrieve_context,
+)
 from sf_dev_agent.context.parsers import (
     ParsedComponent,
     ParsedRelationship,
@@ -544,6 +549,9 @@ __all__ = [
     "SUPPORTED_DELTA_TYPES",
     "compute_deltas",
     "fetch_org_inventory",
+    "ContextHit",
+    "RetrievalResult",
+    "retrieve_context",
     "ParsedComponent",
     "ParsedRelationship",
     "Parser",
