@@ -55,7 +55,18 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sf_dev_agent.context.index import ComponentRow, MetadataIndex, RelationshipEdge
+from sf_dev_agent.context.embedders import (
+    Embedder,
+    MockEmbedder,
+    create_embedder,
+)
+from sf_dev_agent.context.index import (
+    ComponentRow,
+    EmbeddingRefreshResult,
+    MetadataIndex,
+    RelationshipEdge,
+    SemanticSearchHit,
+)
 from sf_dev_agent.context.parsers import (
     ParsedComponent,
     ParsedRelationship,
@@ -242,11 +253,45 @@ def _walk_files(root: Path):
         yield path
 
 
+def embed_index(
+    db_path: Path | str | None = None,
+    embedder: Embedder | None = None,
+    component_types: list[str] | None = None,
+    force: bool = False,
+) -> EmbeddingRefreshResult:
+    """Populate / refresh embeddings for components in the index.
+
+    With no `embedder`, resolves one from env (Gemini if `GOOGLE_API_KEY` set,
+    else MockEmbedder). Hash-gated by default — pass `force=True` to re-embed
+    every row (e.g. after switching models).
+    """
+    db_path = Path(db_path) if db_path else default_db_path()
+    if not db_path.exists():
+        return EmbeddingRefreshResult(
+            errors=[f"Index not found at {db_path}; run build_index first"],
+        )
+    if embedder is None:
+        embedder = create_embedder()
+
+    with MetadataIndex(db_path) as index:
+        return index.embed_components(
+            embedder=embedder,
+            component_types=component_types,
+            force=force,
+        )
+
+
 __all__ = [
     "IndexBuildResult",
     "MetadataIndex",
     "ComponentRow",
     "RelationshipEdge",
+    "SemanticSearchHit",
+    "EmbeddingRefreshResult",
+    "Embedder",
+    "MockEmbedder",
+    "create_embedder",
+    "embed_index",
     "ParsedComponent",
     "ParsedRelationship",
     "Parser",

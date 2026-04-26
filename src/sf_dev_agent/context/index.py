@@ -22,11 +22,14 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+import numpy as np
+
+from sf_dev_agent.context.embedders.base import Embedder, hash_text
 from sf_dev_agent.context.parsers.base import ParsedComponent, ParsedRelationship
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,23 @@ class RelationshipEdge:
     metadata: dict[str, Any]
 
 
+@dataclass
+class SemanticSearchHit:
+    """A hit from semantic_search — component plus cosine similarity score."""
+    component: ComponentRow
+    score: float                   # cosine similarity in [-1, 1]; for normalized vectors -> [0, 1]
+
+
+@dataclass
+class EmbeddingRefreshResult:
+    """Outcome of an embed_components run."""
+    embedded: int = 0              # newly-computed embeddings written this run
+    skipped_unchanged: int = 0     # source hash matched -> no re-embed needed
+    skipped_no_source: int = 0     # rows with no source text (e.g. malformed)
+    errors: list[str] = field(default_factory=list)
+    embedder_name: str = ""
+
+
 class MetadataIndex:
     """Read/write interface to the SQLite metadata index."""
 
@@ -71,6 +91,24 @@ class MetadataIndex:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Idempotent column migrations for DBs created before a column existed.
+
+        SQLite has no `ADD COLUMN IF NOT EXISTS`, so we attempt each ALTER and
+        swallow the duplicate-column error. Cheap, correct, and never destroys data.
+        """
+        for stmt in (
+            "ALTER TABLE components ADD COLUMN embedding BLOB",
+            "ALTER TABLE components ADD COLUMN embedded_source_hash TEXT",
+        ):
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -294,6 +332,191 @@ class MetadataIndex:
             "SELECT component_type, COUNT(*) AS n FROM components GROUP BY component_type"
         ).fetchall()
         return {r["component_type"]: r["n"] for r in rows}
+
+    # ------------------------------------------------------------------
+    # Embeddings
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _embedding_text(component: ComponentRow | sqlite3.Row) -> str:
+        """Compose the canonical text we embed for a component.
+
+        Including type + name biases the embedding toward both name-similarity
+        (so "AccountHandler" still finds "AccountTriggerHandler") AND
+        body-similarity (so "duplicate detection" finds the relevant code).
+        """
+        ctype = component["component_type"] if isinstance(component, sqlite3.Row) else component.component_type
+        name = component["api_name"] if isinstance(component, sqlite3.Row) else component.api_name
+        src = component["source"] if isinstance(component, sqlite3.Row) else component.source
+        body = src or ""
+        return f"{ctype} {name}\n{body}"
+
+    def embed_components(
+        self,
+        embedder: Embedder,
+        component_types: list[str] | None = None,
+        batch_size: int = 32,
+        force: bool = False,
+    ) -> EmbeddingRefreshResult:
+        """Populate or refresh embeddings for components in the index.
+
+        Hash-gated: if `embedded_source_hash` matches the current source's hash,
+        the row is skipped. Pass `force=True` to embed everything regardless
+        (useful after switching embedder models — different dim / different
+        ranking, so old vectors aren't comparable to new query embeddings).
+        """
+        result = EmbeddingRefreshResult(embedder_name=embedder.name)
+
+        # Pull every row that needs work. We compare the current source's hash
+        # against the stored embedded_source_hash to decide.
+        if component_types:
+            placeholders = ",".join(["?"] * len(component_types))
+            rows = self._conn.execute(
+                f"SELECT * FROM components WHERE component_type IN ({placeholders})",
+                tuple(component_types),
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM components").fetchall()
+
+        # Collect what to embed.
+        to_embed: list[tuple[str, str, str]] = []  # (component_id, text, hash)
+        for row in rows:
+            text = self._embedding_text(row)
+            if not (row["source"] or "").strip():
+                result.skipped_no_source += 1
+                continue
+            current_hash = hash_text(text)
+            stored_hash = row["embedded_source_hash"]
+            if not force and stored_hash == current_hash and row["embedding"] is not None:
+                result.skipped_unchanged += 1
+                continue
+            to_embed.append((row["id"], text, current_hash))
+
+        if not to_embed:
+            return result
+
+        # Batch — most providers accept an N-text payload; we still loop in
+        # batch_size chunks so a single huge org doesn't trigger payload limits.
+        for start in range(0, len(to_embed), batch_size):
+            chunk = to_embed[start:start + batch_size]
+            texts = [t for (_, t, _) in chunk]
+            try:
+                vectors = embedder.embed(texts)
+            except Exception as exc:
+                result.errors.append(f"batch starting at {start}: {type(exc).__name__}: {exc}")
+                logger.error("Embedding batch failed: %s", exc)
+                continue
+
+            with self.transaction():
+                for (component_id, _, content_hash), vec in zip(chunk, vectors):
+                    blob = np.asarray(vec, dtype=np.float32).tobytes()
+                    self._conn.execute(
+                        """
+                        UPDATE components
+                        SET embedding = ?, embedded_source_hash = ?
+                        WHERE id = ?
+                        """,
+                        (blob, content_hash, component_id),
+                    )
+                    result.embedded += 1
+
+        return result
+
+    def clear_embeddings(self, component_types: list[str] | None = None) -> int:
+        """Wipe stored embeddings + their hashes. Returns rows cleared."""
+        if component_types:
+            placeholders = ",".join(["?"] * len(component_types))
+            cur = self._conn.execute(
+                f"""
+                UPDATE components
+                SET embedding = NULL, embedded_source_hash = NULL
+                WHERE component_type IN ({placeholders})
+                """,
+                tuple(component_types),
+            )
+        else:
+            cur = self._conn.execute(
+                "UPDATE components SET embedding = NULL, embedded_source_hash = NULL"
+            )
+        self._conn.commit()
+        return cur.rowcount or 0
+
+    def embedding_stats(self) -> dict[str, dict[str, int]]:
+        """Return per-type embedding coverage: {type: {total, embedded}}."""
+        rows = self._conn.execute(
+            """
+            SELECT
+                component_type,
+                COUNT(*) AS total,
+                SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded
+            FROM components
+            GROUP BY component_type
+            """
+        ).fetchall()
+        return {
+            r["component_type"]: {"total": r["total"], "embedded": r["embedded"]}
+            for r in rows
+        }
+
+    def semantic_search(
+        self,
+        query_embedding: np.ndarray,
+        component_type: str | None = None,
+        limit: int = 10,
+    ) -> list[SemanticSearchHit]:
+        """Return the top-k components ranked by cosine similarity to the query.
+
+        For normalized vectors (which both MockEmbedder and GeminiEmbedder
+        produce), cosine similarity = dot product. We do the math in numpy
+        across all embedded rows; SQLite is just key-value storage here.
+        """
+        query = np.asarray(query_embedding, dtype=np.float32)
+        norm = np.linalg.norm(query)
+        if norm > 0:
+            query = query / norm
+
+        if component_type:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM components
+                WHERE embedding IS NOT NULL AND component_type = ?
+                """,
+                (component_type,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM components WHERE embedding IS NOT NULL"
+            ).fetchall()
+
+        if not rows:
+            return []
+
+        # Stack all candidate vectors, batch dot-product.
+        matrix = np.vstack([
+            np.frombuffer(r["embedding"], dtype=np.float32) for r in rows
+        ])
+        # Defensive normalize — if a stored vector wasn't normalized at write time.
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        matrix = matrix / norms
+
+        scores = matrix @ query  # shape: (N,)
+
+        # Take top-k indices, descending.
+        if len(scores) <= limit:
+            top_idx = np.argsort(-scores)
+        else:
+            # argpartition is O(N); slice + sort the small head.
+            partition = np.argpartition(-scores, limit)[:limit]
+            top_idx = partition[np.argsort(-scores[partition])]
+
+        return [
+            SemanticSearchHit(
+                component=_row_to_component(rows[int(i)]),
+                score=float(scores[int(i)]),
+            )
+            for i in top_idx
+        ]
 
     # ------------------------------------------------------------------
     # Run tracking

@@ -30,6 +30,10 @@ _SF_TOOLS = frozenset({
     "sf_source_deploy",
     "sf_test_run",
     "build_metadata_index",  # also hits the org via sf project retrieve
+    # Embedding tools also call out to a remote provider (Gemini), so they're
+    # intercepted in mock mode to avoid burning API quota on offline tests.
+    "embed_metadata_index",
+    "semantic_search",
 })
 
 
@@ -426,6 +430,90 @@ class ToolRegistry:
             executor=self._exec_sf_dependency_graph,
         )
 
+        # --- semantic_search (vector search over the metadata index) ---
+        self.register(
+            ToolDefinition(
+                name="semantic_search",
+                description=(
+                    "Vector-based semantic search over the metadata index. "
+                    "Use this when you're looking for code or components by "
+                    "concept rather than literal name — e.g., 'duplicate "
+                    "detection logic', 'tax calculation', 'lead routing'. "
+                    "Prefer code_search for literal name/substring lookups; "
+                    "prefer this for conceptual queries. Requires that "
+                    "embed_metadata_index has been run; returns a structured "
+                    "error if no embeddings exist yet."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural-language description of what you're looking for.",
+                        },
+                        "component_type": {
+                            "type": "string",
+                            "description": "Restrict to one type. Omit for all.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default 10, max 50).",
+                            "default": 10,
+                        },
+                        "min_score": {
+                            "type": "number",
+                            "description": (
+                                "Drop results below this cosine-similarity "
+                                "threshold (0..1). Default 0 (return all top-k)."
+                            ),
+                            "default": 0.0,
+                        },
+                    },
+                    "required": ["query"],
+                },
+                read_only=True,
+            ),
+            executor=self._exec_semantic_search,
+        )
+
+        # --- embed_metadata_index (populate/refresh embeddings) ---
+        self.register(
+            ToolDefinition(
+                name="embed_metadata_index",
+                description=(
+                    "Populate or refresh embeddings for components in the "
+                    "local metadata index. Hash-gated — only re-embeds rows "
+                    "whose source has changed since last embedding. Run this "
+                    "once after build_metadata_index, and again after deploys "
+                    "that change source. Cheap when nothing has changed."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "component_types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Restrict re-embedding to these types. "
+                                "Omit to refresh all supported types."
+                            ),
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": (
+                                "Re-embed even if the source hash is "
+                                "unchanged. Use after switching embedder "
+                                "models. Default false."
+                            ),
+                            "default": False,
+                        },
+                    },
+                },
+                read_only=True,
+            ),
+            executor=self._exec_embed_metadata_index,
+        )
+
         # --- build_metadata_index (refreshes local SQLite from live org) ---
         self.register(
             ToolDefinition(
@@ -819,4 +907,112 @@ class ToolRegistry:
             "parser_errors": result.parser_errors,
             "retrieve_error": result.retrieve_error,
             "component_types": result.component_types,
+        }
+
+    def _exec_embed_metadata_index(
+        self,
+        component_types: list[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Populate/refresh embeddings for indexed components."""
+        from sf_dev_agent.context import MetadataIndex, create_embedder
+
+        db_path = self._resolve_index_db_path()
+        if not db_path.exists():
+            return self._index_missing_response(db_path)
+
+        try:
+            embedder = create_embedder()
+        except (ValueError, ImportError) as exc:
+            return {"error": f"Could not initialize embedder: {exc}"}
+
+        with MetadataIndex(db_path) as index:
+            try:
+                result = index.embed_components(
+                    embedder=embedder,
+                    component_types=component_types,
+                    force=force,
+                )
+            except Exception as exc:
+                return {"error": f"Embedding failed: {type(exc).__name__}: {exc}"}
+            stats = index.embedding_stats()
+
+        return {
+            "embedder": result.embedder_name,
+            "embedded": result.embedded,
+            "skipped_unchanged": result.skipped_unchanged,
+            "skipped_no_source": result.skipped_no_source,
+            "errors": result.errors,
+            "coverage": stats,
+        }
+
+    def _exec_semantic_search(
+        self,
+        query: str,
+        component_type: str | None = None,
+        limit: int = 10,
+        min_score: float = 0.0,
+    ) -> dict[str, Any]:
+        """Embed the query and rank components by cosine similarity."""
+        from sf_dev_agent.context import MetadataIndex, create_embedder
+
+        db_path = self._resolve_index_db_path()
+        if not db_path.exists():
+            return self._index_missing_response(db_path)
+
+        limit = max(1, min(limit, 50))
+
+        try:
+            # For Gemini, queries should use task_type=RETRIEVAL_QUERY (different
+            # optimization than the document side). The factory accepts kwargs
+            # but the default path uses RETRIEVAL_DOCUMENT — try to override
+            # if we can; otherwise fall back gracefully.
+            try:
+                embedder = create_embedder(task_type="RETRIEVAL_QUERY")
+            except (TypeError, ValueError):
+                # Fallback when the embedder doesn't support task_type
+                # (e.g. the mock embedder).
+                embedder = create_embedder()
+        except (ValueError, ImportError) as exc:
+            return {"error": f"Could not initialize embedder: {exc}"}
+
+        try:
+            query_vec = embedder.embed_one(query)
+        except Exception as exc:
+            return {"error": f"Embedding the query failed: {type(exc).__name__}: {exc}"}
+
+        with MetadataIndex(db_path) as index:
+            hits = index.semantic_search(
+                query_embedding=query_vec,
+                component_type=component_type,
+                limit=limit,
+            )
+
+        filtered = [h for h in hits if h.score >= min_score]
+        if not filtered and hits:
+            # Surface the highest-scoring hit anyway so the agent knows the
+            # best match (even if it's below threshold). Useful diagnostic.
+            best_hit_score = hits[0].score
+            return {
+                "query": query,
+                "component_type": component_type,
+                "embedder": embedder.name,
+                "match_count": 0,
+                "best_score_below_threshold": best_hit_score,
+                "min_score": min_score,
+                "results": [],
+            }
+
+        return {
+            "query": query,
+            "component_type": component_type,
+            "embedder": embedder.name,
+            "match_count": len(filtered),
+            "results": [
+                {
+                    **self._component_summary(h.component, include_source=False),
+                    "score": round(h.score, 4),
+                }
+                for h in filtered
+            ],
         }

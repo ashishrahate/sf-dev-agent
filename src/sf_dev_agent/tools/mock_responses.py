@@ -233,5 +233,27 @@ def get_mock_response(tool_name: str, tool_input: dict[str, Any]) -> dict[str, A
             "note": "build_metadata_index skipped in mock-org mode",
         }
 
+    if tool_name == "embed_metadata_index":
+        return {
+            "embedder": "mock:offline",
+            "embedded": 0,
+            "skipped_unchanged": 0,
+            "skipped_no_source": 0,
+            "errors": [],
+            "coverage": {},
+            "mocked": True,
+            "note": "embed_metadata_index skipped in mock-org mode",
+        }
+
+    if tool_name == "semantic_search":
+        return {
+            "query": tool_input.get("query", ""),
+            "embedder": "mock:offline",
+            "match_count": 0,
+            "results": [],
+            "mocked": True,
+            "note": "semantic_search skipped in mock-org mode",
+        }
+
     # Unknown SF tool — return a generic ok
     return {"status": 0, "result": {"mocked": True, "tool": tool_name}}

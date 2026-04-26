@@ -10,14 +10,16 @@
 -- relationship_type, again no DDL change needed for new edge kinds.
 
 CREATE TABLE IF NOT EXISTS components (
-    id              TEXT PRIMARY KEY,           -- "ApexClass:AccountHandler"
-    component_type  TEXT NOT NULL,              -- "ApexClass", "ApexTrigger", "CustomObject", ...
-    api_name        TEXT NOT NULL,              -- "AccountHandler"
-    parent_id       TEXT,                       -- e.g. CustomField -> CustomObject:Account
-    file_path       TEXT,                       -- relative path inside retrieve dir
-    source          TEXT,                       -- raw .cls / .trigger / xml content
-    metadata_json   TEXT NOT NULL DEFAULT '{}', -- type-specific extracted fields
-    last_indexed_at TEXT NOT NULL,              -- ISO-8601 UTC
+    id                    TEXT PRIMARY KEY,           -- "ApexClass:AccountHandler"
+    component_type        TEXT NOT NULL,              -- "ApexClass", "ApexTrigger", "CustomObject", ...
+    api_name              TEXT NOT NULL,              -- "AccountHandler"
+    parent_id             TEXT,                       -- e.g. CustomField -> CustomObject:Account
+    file_path             TEXT,                       -- relative path inside retrieve dir
+    source                TEXT,                       -- raw .cls / .trigger / xml content
+    metadata_json         TEXT NOT NULL DEFAULT '{}', -- type-specific extracted fields
+    last_indexed_at       TEXT NOT NULL,              -- ISO-8601 UTC
+    embedding             BLOB,                       -- float32 vector serialized via .tobytes()
+    embedded_source_hash  TEXT,                       -- sha256 of the text we embedded; gate for re-embed
     FOREIGN KEY (parent_id) REFERENCES components(id) ON DELETE CASCADE
 );
 

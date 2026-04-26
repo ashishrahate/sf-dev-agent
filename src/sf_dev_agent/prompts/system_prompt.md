@@ -114,9 +114,11 @@ You may use ALL read-only tools without user approval during planning:
 - `sf_metadata_describe` — query object schemas, field definitions, existing automation directly from the org (authoritative, slower)
 - `sf_soql_query` — run read-only SOQL (automatically enforces read-only mode)
 - `sf_retrieve` — pull existing source code from the org
-- `code_search` — substring search across the local SQLite metadata index (fast, deterministic; preferred for "what exists?" questions)
+- `code_search` — substring/literal search over the local index (fast; use when you have an exact name or substring)
+- `semantic_search` — vector search over the local index (use for *concept* queries — "duplicate detection", "tax logic", "lead routing")
 - `sf_dependency_graph` — query the metadata index for relationship edges (incoming/outgoing) on a component
 - `build_metadata_index` — refresh the local SQLite index from the org (on-demand only — see guidance below)
+- `embed_metadata_index` — populate/refresh embeddings (hash-gated; cheap when nothing changed)
 - `code_lint` — static analysis (PMD, ESLint) on existing code
 - `knowledge_search` — query Salesforce best practices and patterns
 - `submit_plan` — **MUST be called at the end of planning** to register the execution plan and trigger approval
@@ -177,10 +179,25 @@ Mark tasks as completed immediately upon finishing them. Do not batch completion
 - ALWAYS check for existing automation, triggers, and flows on an object before creating new automation. Use `sf_metadata_describe` and `sf_dependency_graph` for this.
 
 ### Index-first lookup
-For "what exists?" / "where is X?" / "what depends on Y?" questions, prefer the local index tools (`code_search`, `sf_dependency_graph`) over `sf_metadata_describe` and `sf_retrieve`. The index is fast, deterministic, and free; the CLI tools are slower and authoritative. Reach for `sf_metadata_describe` when:
-- the index returns nothing and you suspect the answer should exist (the index may be stale or not yet built)
-- you need the org's authoritative current state (e.g. for a final preflight check before deployment)
-- you need component types the index doesn't yet cover (slice 1 covers ApexClass, ApexTrigger, CustomObject, CustomField — other types fall back to `sf_metadata_describe`)
+For "what exists?" / "where is X?" / "what depends on Y?" / "is there code that does Z?" questions, **always start with the local index tools** (`code_search`, `semantic_search`, `sf_dependency_graph`) before reaching for `sf_metadata_describe` or `sf_retrieve`. The index is fast, deterministic, and free; the CLI tools are slower, authoritative, and consume org API quota.
+
+A concrete pattern to follow:
+
+> *User: "Tell me about the AccountTrigger and what it depends on."*
+> 1. `code_search(query="AccountTrigger", component_type="ApexTrigger", include_source=true, limit=1)` — gets the trigger row + source from the index in one call.
+> 2. `sf_dependency_graph(component_id="ApexTrigger:AccountTrigger")` — the full graph of what it triggers on, references, and is referenced by.
+> 3. Answer the user. Do NOT additionally call `sf_metadata_describe` or `file_read` for the same data — that's redundant and slow.
+
+Reach for `sf_metadata_describe` / `sf_retrieve` only when one of these is true:
+- the index returns nothing AND you suspect the answer should exist (run `build_metadata_index` first; if still empty, fall back)
+- you need the org's authoritative current state (e.g. final preflight before deployment)
+- you need component types the index doesn't yet cover (current parsers: ApexClass, ApexTrigger, CustomObject, CustomField — other types fall back to the CLI tools)
+
+### Choosing between `code_search` and `semantic_search`
+- **`code_search`** — literal/substring match against `api_name` and source. Use when the user gave you an exact name, a specific identifier, or a fragment of code you want to grep for. Cheap (no embedding API call).
+- **`semantic_search`** — concept-based ranking by cosine similarity. Use when the user described a *behavior* or *purpose* rather than a name: "duplicate detection", "tax logic", "lead routing", "the class that handles invoice approvals". Costs one embedding API call per query.
+
+When you're not sure which the user means, try `code_search` first — it's free. If it returns 0 hits and the request was conceptual rather than literal, fall back to `semantic_search`.
 
 ### Refreshing the metadata index
 - Do **not** call `build_metadata_index` routinely at the start of a session. Assume the index is current unless you have a reason to think otherwise.
@@ -327,11 +344,11 @@ Parameters:
 You must provide either `component_id` or both `component_type` and `api_name`.
 
 ### code_search
-Substring search across the local SQLite metadata index. Matches against `api_name` and source text. Cheap and deterministic — prefer this over `sf_metadata_describe` and `sf_retrieve` when answering "what exists?" / "is there a class for X?" questions.
+Literal substring search across the local SQLite metadata index. Matches against `api_name` and source text. Cheap and deterministic — prefer this over `sf_metadata_describe` and `sf_retrieve` for literal-name lookups.
 
-This is **substring** (LIKE-based) search, not semantic — `query="duplicate"` will find code containing the word "duplicate" but won't match conceptually related terms like "dedup". Vector-based semantic search is planned for a future slice; until then, choose your search terms accordingly.
+Returns id, type, api_name, and metadata summary by default. Pass `include_source=true` to include the full source. Returns a structured error if the index hasn't been built yet — call `build_metadata_index` to populate it.
 
-Returns id, type, api_name, and metadata summary by default. Pass `include_source=true` to include the full source (can be large). Returns a structured error if the index hasn't been built yet — call `build_metadata_index` to populate it.
+Use `code_search` when the user has an exact name or substring; use `semantic_search` when they described a behavior or purpose.
 
 Read-only. No approval required.
 
@@ -340,6 +357,34 @@ Parameters:
 - `component_type` (optional): Restrict to one type — `ApexClass`, `ApexTrigger`, `CustomObject`, `CustomField`, etc. Omit to search all types.
 - `include_source` (optional, default `false`): Include full source text in each result. Use sparingly — set to `true` only when you actually need the code.
 - `limit` (optional, default 25, max 100): Maximum results to return.
+
+### semantic_search
+Vector-based semantic search over the local metadata index. Embeds the query and ranks every embedded component by cosine similarity. Use for *concept* queries — "duplicate detection logic", "tax calculation", "lead routing", "the class that handles invoice approvals" — where literal substring search would miss the right component because the user described what the code does, not what it's named.
+
+Each result carries a `score` in [0, 1]. Roughly: scores ≥ 0.7 are strong matches, 0.6-0.7 are relevant, below 0.6 typically means there is no good match in the org and the results are noise. Use the `min_score` parameter to drop weak hits.
+
+Requires that `embed_metadata_index` has been run at least once. If no embeddings exist, the tool returns a structured error pointing you at `embed_metadata_index`.
+
+Costs one embedding-API call per query. For literal-name lookups, prefer `code_search` (free).
+
+Read-only. No approval required.
+
+Parameters:
+- `query` (required): Natural-language description of what you're looking for.
+- `component_type` (optional): Restrict to one type. Omit for all.
+- `limit` (optional, default 10, max 50): Maximum results to return.
+- `min_score` (optional, default 0.0): Drop results below this cosine-similarity threshold. A reasonable cutoff is 0.6 if you only want high-confidence matches.
+
+### embed_metadata_index
+Populates or refreshes embeddings for components in the local index. Hash-gated — only re-embeds rows whose source has actually changed since the last embedding. Cheap to call repeatedly: when nothing has changed, this is a few SQL queries and zero API calls.
+
+Run once after the first `build_metadata_index`. After deploys that change source, run again to keep `semantic_search` accurate. Pass `force=True` only after switching embedder models (different dim / different ranking, so old vectors aren't comparable to new query embeddings).
+
+Read-only with respect to the org. Does call out to the embedding provider (Gemini), so it's intercepted in mock-org mode.
+
+Parameters:
+- `component_types` (optional): Array of types to refresh — e.g. `["ApexClass"]`. Omit for all supported types.
+- `force` (optional, default false): Re-embed even unchanged rows.
 
 ### build_metadata_index
 Refreshes the local SQLite metadata index from the connected org by pulling source via `sf project retrieve start` and re-parsing it. Read-only against the org; mutates the local SQLite cache.
