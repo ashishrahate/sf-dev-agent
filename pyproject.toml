@@ -36,3 +36,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: tests that hit a live Salesforce org (run with `pytest -m integration`)",
+]
+addopts = "-m 'not integration'"

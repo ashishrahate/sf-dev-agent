@@ -21,12 +21,18 @@ wheels/
 *.swo
 *~
 
+# Claude Code workspace state (local agent tooling)
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
 
 # Agent workspace (ephemeral task files)
 /workspace/
+
+# Metadata index cache (SQLite DB + retrieved source)
+.cache/
 
 # Test artifacts
 .pytest_cache/
