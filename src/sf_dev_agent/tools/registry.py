@@ -519,11 +519,17 @@ class ToolRegistry:
             ToolDefinition(
                 name="build_metadata_index",
                 description=(
-                    "Refresh the local SQLite metadata index from the connected org. "
-                    "Read-only against the org (uses sf project retrieve start). Run "
-                    "this once at session start, after deploys, or when the index "
-                    "looks stale. Currently indexes ApexClass, ApexTrigger, "
-                    "CustomObject (and their CustomFields)."
+                    "Refresh the local SQLite metadata index from the connected "
+                    "org. Read-only against the org. Currently indexes ApexClass, "
+                    "ApexTrigger, CustomObject (and their CustomFields).\n\n"
+                    "Defaults to **delta-refresh**: only components whose "
+                    "LastModifiedDate in the org is newer than what's in the "
+                    "local index are retrieved, components no longer in the org "
+                    "are pruned, and unchanged components are skipped. This "
+                    "makes post-deploy refreshes cheap. ApexClass and ApexTrigger "
+                    "support delta; other types fall back to full retrieve.\n\n"
+                    "Pass full_refresh=true as a 'rebuild from scratch' escape "
+                    "hatch (e.g. after a parser/schema change)."
                 ),
                 parameters={
                     "type": "object",
@@ -535,6 +541,14 @@ class ToolRegistry:
                                 "Restrict the refresh to these types (default: all "
                                 "supported types). Useful for fast post-deploy refreshes."
                             ),
+                        },
+                        "full_refresh": {
+                            "type": "boolean",
+                            "description": (
+                                "Bypass delta logic and re-fetch every component "
+                                "for the requested types. Default false."
+                            ),
+                            "default": False,
                         },
                     },
                 },
@@ -888,6 +902,7 @@ class ToolRegistry:
     def _exec_build_metadata_index(
         self,
         component_types: list[str] | None = None,
+        full_refresh: bool = False,
     ) -> dict[str, Any]:
         """Refresh the SQLite metadata index from the connected org."""
         from sf_dev_agent.context import build_index
@@ -897,15 +912,21 @@ class ToolRegistry:
             org_alias=self.org.org_alias,
             db_path=db_path,
             component_types=component_types,
+            delta=not full_refresh,
         )
         return {
             "success": result.success,
             "db_path": str(result.db_path),
+            "delta_mode": result.delta_mode,
             "components_indexed": result.components_indexed,
+            "components_fetched": result.components_fetched,
+            "components_deleted": result.components_deleted,
+            "components_unchanged": result.components_unchanged,
             "relationships_indexed": result.relationships_indexed,
             "relationships_skipped": result.relationships_skipped,
             "parser_errors": result.parser_errors,
             "retrieve_error": result.retrieve_error,
+            "inventory_errors": result.inventory_errors,
             "component_types": result.component_types,
         }
 

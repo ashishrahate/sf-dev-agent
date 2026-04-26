@@ -55,6 +55,14 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sf_dev_agent.context.delta import (
+    SUPPORTED_DELTA_TYPES,
+    DeltaPlan,
+    OrgComponent,
+    OrgInventory,
+    compute_deltas,
+    fetch_org_inventory,
+)
 from sf_dev_agent.context.embedders import (
     Embedder,
     MockEmbedder,
@@ -76,7 +84,7 @@ from sf_dev_agent.context.parsers import (
     get_parsers,
     register,
 )
-from sf_dev_agent.context.retriever import RetrieveResult, retrieve
+from sf_dev_agent.context.retriever import RetrieveResult, retrieve, retrieve_components
 from sf_dev_agent.paths import repo_root
 
 logger = logging.getLogger(__name__)
@@ -92,6 +100,12 @@ class IndexBuildResult:
     parser_errors: list[tuple[str, str]] = field(default_factory=list)
     retrieve_error: str | None = None
     component_types: list[str] = field(default_factory=list)
+    # Delta-refresh fields. Set when build_index runs in delta mode.
+    delta_mode: bool = False
+    components_fetched: int = 0           # how many were retrieved from the org this run
+    components_deleted: int = 0           # rows pruned because they no longer exist in the org
+    components_unchanged: int = 0         # rows the delta planner skipped — still in the index
+    inventory_errors: list[str] = field(default_factory=list)
 
 
 def default_db_path() -> Path:
@@ -190,14 +204,27 @@ def build_index(
     retrieve_dir: Path | str | None = None,
     component_types: list[str] | None = None,
     cleanup_retrieve: bool = True,
+    delta: bool = True,
 ) -> IndexBuildResult:
     """Retrieve metadata from a live org and ingest it into the SQLite index.
 
-    The retrieve staging directory is wiped after a successful ingestion so the
-    on-disk source doesn't duplicate what's already in the SQLite `source`
-    column. Pass `cleanup_retrieve=False` to keep the directory for
-    inspection/debugging. On failure the directory is preserved regardless,
-    so you can see what the CLI returned.
+    With `delta=True` (default), only components whose Tooling-API
+    `LastModifiedDate` is newer than the local `last_indexed_at` are
+    retrieved, and components no longer present in the org are pruned. This
+    keeps post-deploy refreshes cheap and bounded.
+
+    Component types not currently supported by the delta planner (anything
+    other than ApexClass, ApexTrigger today — see `SUPPORTED_DELTA_TYPES`)
+    fall back to the full-retrieve path for those types only. The two paths
+    co-exist in a single call: ApexClass + ApexTrigger refresh via delta,
+    CustomObject (etc.) full-retrieves, both ingest into the same DB.
+
+    Pass `delta=False` to force a full retrieve of every type (useful as a
+    "rebuild from scratch" escape hatch — e.g. after a schema migration).
+
+    The retrieve staging directory is wiped after a successful ingestion so
+    the on-disk source doesn't duplicate the SQLite copy. On failure the
+    directory is preserved for debugging.
     """
     db_path = Path(db_path) if db_path else default_db_path()
     retrieve_dir = (
@@ -206,9 +233,35 @@ def build_index(
     )
     types = component_types or default_component_types()
 
+    if delta:
+        return _build_index_delta(
+            org_alias=org_alias,
+            db_path=db_path,
+            retrieve_dir=retrieve_dir,
+            component_types=types,
+            cleanup_retrieve=cleanup_retrieve,
+        )
+    return _build_index_full(
+        org_alias=org_alias,
+        db_path=db_path,
+        retrieve_dir=retrieve_dir,
+        component_types=types,
+        cleanup_retrieve=cleanup_retrieve,
+    )
+
+
+def _build_index_full(
+    *,
+    org_alias: str,
+    db_path: Path,
+    retrieve_dir: Path,
+    component_types: list[str],
+    cleanup_retrieve: bool,
+) -> IndexBuildResult:
+    """Full-refresh path — retrieve everything for the requested types."""
     retrieve_result = retrieve(
         org_alias=org_alias,
-        component_types=types,
+        component_types=component_types,
         target_dir=retrieve_dir,
     )
 
@@ -216,7 +269,7 @@ def build_index(
         return IndexBuildResult(
             success=False,
             db_path=db_path,
-            component_types=types,
+            component_types=component_types,
             retrieve_error=retrieve_result.error,
         )
 
@@ -225,17 +278,158 @@ def build_index(
         db_path=db_path,
         org_alias=org_alias,
     )
+    ingest_result.components_fetched = ingest_result.components_indexed
+    ingest_result.delta_mode = False
 
     if ingest_result.success and cleanup_retrieve:
-        try:
-            shutil.rmtree(retrieve_dir)
-            logger.info("Cleaned up retrieve staging dir: %s", retrieve_dir)
-        except OSError as exc:
-            # Cleanup failure shouldn't fail the whole build — the index is fine,
-            # the user just has a stale dir they can manually delete.
-            logger.warning("Failed to clean up %s: %s", retrieve_dir, exc)
+        _try_cleanup(retrieve_dir)
 
     return ingest_result
+
+
+def _build_index_delta(
+    *,
+    org_alias: str,
+    db_path: Path,
+    retrieve_dir: Path,
+    component_types: list[str],
+    cleanup_retrieve: bool,
+) -> IndexBuildResult:
+    """Delta-refresh path — only fetch what changed.
+
+    Strategy:
+      - Split requested types into delta-supported (ApexClass, ApexTrigger)
+        and unsupported (everything else).
+      - For unsupported types, run the existing full-retrieve.
+      - For supported types, fetch the org's Tooling-API inventory, diff it
+        against `MetadataIndex.inventory_for_types(...)`, retrieve only the
+        deltas, and prune deletions from the index.
+      - Both paths land their source under the same retrieve dir and ingest
+        in one pass so relationship resolution sees every component together.
+    """
+    delta_types = [t for t in component_types if t in SUPPORTED_DELTA_TYPES]
+    full_types = [t for t in component_types if t not in SUPPORTED_DELTA_TYPES]
+
+    inventory_errors: list[str] = []
+    plan: DeltaPlan | None = None
+
+    # --- Phase A: full-retrieve unsupported types (CustomObject, etc.) ---
+    full_retrieve_result: RetrieveResult | None = None
+    if full_types:
+        full_retrieve_result = retrieve(
+            org_alias=org_alias,
+            component_types=full_types,
+            target_dir=retrieve_dir,
+        )
+        if not full_retrieve_result.success:
+            return IndexBuildResult(
+                success=False,
+                db_path=db_path,
+                component_types=component_types,
+                retrieve_error=full_retrieve_result.error,
+                delta_mode=True,
+                inventory_errors=inventory_errors,
+            )
+
+    # --- Phase B: compute deltas for supported types ---
+    components_deleted = 0
+    components_unchanged = 0
+    delta_retrieve_result: RetrieveResult | None = None
+
+    if delta_types:
+        inventory = fetch_org_inventory(org_alias=org_alias, component_types=delta_types)
+        inventory_errors.extend(inventory.errors)
+
+        with MetadataIndex(db_path) as index:
+            indexed = index.inventory_for_types(delta_types)
+
+        plan = compute_deltas(
+            inventory=inventory,
+            indexed=indexed,
+            requested_types=delta_types,
+        )
+        components_unchanged = len(plan.unchanged)
+        logger.info(
+            "Delta plan: fetch=%d delete=%d unchanged=%d",
+            len(plan.to_fetch), len(plan.to_delete), len(plan.unchanged),
+        )
+
+        # Prune deletions before ingestion so a re-created component isn't
+        # accidentally orphaned.
+        if plan.to_delete:
+            with MetadataIndex(db_path) as index:
+                components_deleted = index.delete_components(plan.to_delete)
+
+        # Targeted retrieve.
+        if plan.to_fetch:
+            delta_retrieve_result = retrieve_components(
+                org_alias=org_alias,
+                component_ids=plan.to_fetch,
+                target_dir=retrieve_dir,
+            )
+            if not delta_retrieve_result.success:
+                return IndexBuildResult(
+                    success=False,
+                    db_path=db_path,
+                    component_types=component_types,
+                    retrieve_error=delta_retrieve_result.error,
+                    delta_mode=True,
+                    components_deleted=components_deleted,
+                    components_unchanged=components_unchanged,
+                    inventory_errors=inventory_errors,
+                )
+
+    # --- Phase C: ingest whatever landed in retrieve_dir ---
+    # The dir holds source from BOTH the unsupported-types full retrieve and
+    # the supported-types targeted retrieve; ingest_directory walks everything
+    # in one pass. If neither phase produced files (delta with no changes,
+    # nothing else requested), short-circuit.
+    nothing_landed = (
+        full_retrieve_result is None
+        and (delta_retrieve_result is None or not (plan and plan.to_fetch))
+    )
+
+    if nothing_landed:
+        result = IndexBuildResult(
+            success=True,
+            db_path=db_path,
+            component_types=component_types,
+            delta_mode=True,
+            components_fetched=0,
+            components_deleted=components_deleted,
+            components_unchanged=components_unchanged,
+            inventory_errors=inventory_errors,
+        )
+        # Even with no fetched files, the retrieve dir may have been created
+        # earlier — clean up if asked.
+        if cleanup_retrieve:
+            _try_cleanup(retrieve_dir)
+        return result
+
+    ingest_result = ingest_directory(
+        source_dir=retrieve_dir,
+        db_path=db_path,
+        org_alias=org_alias,
+    )
+    ingest_result.delta_mode = True
+    ingest_result.components_fetched = ingest_result.components_indexed
+    ingest_result.components_deleted = components_deleted
+    ingest_result.components_unchanged = components_unchanged
+    ingest_result.inventory_errors = inventory_errors
+
+    if ingest_result.success and cleanup_retrieve:
+        _try_cleanup(retrieve_dir)
+
+    return ingest_result
+
+
+def _try_cleanup(path: Path) -> None:
+    """Wipe the retrieve staging dir; non-fatal on failure."""
+    try:
+        shutil.rmtree(path)
+        logger.info("Cleaned up retrieve staging dir: %s", path)
+    except OSError as exc:
+        logger.warning("Failed to clean up %s: %s", path, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +486,12 @@ __all__ = [
     "MockEmbedder",
     "create_embedder",
     "embed_index",
+    "DeltaPlan",
+    "OrgComponent",
+    "OrgInventory",
+    "SUPPORTED_DELTA_TYPES",
+    "compute_deltas",
+    "fetch_org_inventory",
     "ParsedComponent",
     "ParsedRelationship",
     "Parser",

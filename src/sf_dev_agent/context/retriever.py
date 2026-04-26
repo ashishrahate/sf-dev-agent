@@ -102,3 +102,92 @@ def retrieve(
         raw=payload,
         error=None if success else (payload.get("message") or proc.stderr[-500:]),
     )
+
+
+def retrieve_components(
+    org_alias: str,
+    component_ids: list[str],
+    target_dir: Path,
+    timeout: int = 600,
+) -> RetrieveResult:
+    """Targeted retrieve for specific components, e.g. delta refresh.
+
+    `component_ids` are canonical "Type:Name" strings — exactly what
+    `--metadata` expects. The sf CLI accepts each as a separate `--metadata`
+    flag.
+
+    Returns the same shape as `retrieve()`, but `component_types` is the set of
+    types that appeared in the supplied ids.
+    """
+    target_dir = Path(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "force-app" / "main" / "default").mkdir(parents=True, exist_ok=True)
+
+    project_file = target_dir / "sfdx-project.json"
+    if not project_file.exists():
+        project_file.write_text(
+            json.dumps({
+                "packageDirectories": [{"path": "force-app", "default": True}],
+                "name": "metadata-index-retrieve",
+                "namespace": "",
+                "sfdcLoginUrl": "https://login.salesforce.com",
+                "sourceApiVersion": "62.0",
+            }, indent=2),
+            encoding="utf-8",
+        )
+
+    types_in_request = sorted({cid.split(":", 1)[0] for cid in component_ids if ":" in cid})
+
+    if not component_ids:
+        return RetrieveResult(
+            success=True,
+            output_dir=target_dir,
+            component_types=types_in_request,
+            raw={"status": 0, "result": {"files": [], "note": "no components requested"}},
+        )
+
+    cmd = [_sf_exe(), "project", "retrieve", "start"]
+    for cid in component_ids:
+        cmd += ["--metadata", cid]
+    cmd += ["--target-org", org_alias, "--json"]
+    logger.info(
+        "Targeted retrieve (%d components, cwd=%s): %s",
+        len(component_ids), target_dir, " ".join(cmd[:6] + ["..."])
+    )
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(target_dir),
+        )
+    except subprocess.TimeoutExpired:
+        return RetrieveResult(
+            success=False,
+            output_dir=target_dir,
+            component_types=types_in_request,
+            raw={},
+            error=f"sf retrieve timed out after {timeout}s",
+        )
+
+    try:
+        payload = json.loads(proc.stdout) if proc.stdout else {}
+    except json.JSONDecodeError:
+        return RetrieveResult(
+            success=False,
+            output_dir=target_dir,
+            component_types=types_in_request,
+            raw={"stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]},
+            error="sf retrieve produced non-JSON output",
+        )
+
+    success = payload.get("status") == 0
+    return RetrieveResult(
+        success=success,
+        output_dir=target_dir,
+        component_types=types_in_request,
+        raw=payload,
+        error=None if success else (payload.get("message") or proc.stderr[-500:]),
+    )

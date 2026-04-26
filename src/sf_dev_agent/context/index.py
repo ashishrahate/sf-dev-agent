@@ -334,6 +334,43 @@ class MetadataIndex:
         return {r["component_type"]: r["n"] for r in rows}
 
     # ------------------------------------------------------------------
+    # Delta-refresh support: who's already indexed, and bulk delete
+    # ------------------------------------------------------------------
+
+    def inventory_for_types(self, component_types: list[str]) -> dict[str, str]:
+        """Return {component_id: last_indexed_at} for rows of the given types.
+
+        Backs the delta planner — pair this with the org's Tooling-API
+        inventory and compare timestamps.
+        """
+        if not component_types:
+            return {}
+        placeholders = ",".join(["?"] * len(component_types))
+        rows = self._conn.execute(
+            f"""
+            SELECT id, last_indexed_at FROM components
+            WHERE component_type IN ({placeholders})
+            """,
+            tuple(component_types),
+        ).fetchall()
+        return {r["id"]: r["last_indexed_at"] for r in rows}
+
+    def delete_components(self, component_ids: list[str]) -> int:
+        """Bulk-delete components by id. CASCADE drops their relationships.
+
+        Returns the number of rows deleted.
+        """
+        if not component_ids:
+            return 0
+        placeholders = ",".join(["?"] * len(component_ids))
+        cur = self._conn.execute(
+            f"DELETE FROM components WHERE id IN ({placeholders})",
+            tuple(component_ids),
+        )
+        self._conn.commit()
+        return cur.rowcount or 0
+
+    # ------------------------------------------------------------------
     # Embeddings
     # ------------------------------------------------------------------
 

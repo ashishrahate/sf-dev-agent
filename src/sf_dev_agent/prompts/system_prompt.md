@@ -387,14 +387,21 @@ Parameters:
 - `force` (optional, default false): Re-embed even unchanged rows.
 
 ### build_metadata_index
-Refreshes the local SQLite metadata index from the connected org by pulling source via `sf project retrieve start` and re-parsing it. Read-only against the org; mutates the local SQLite cache.
+Refreshes the local SQLite metadata index from the connected org. Read-only against the org; mutates the local SQLite cache.
 
-**Do not call this routinely at the start of a session.** Assume the index is current. Call it on-demand only — see the "Refreshing the metadata index" section under Tool Usage Policy for when this is appropriate.
+Defaults to **delta refresh**: it queries the Tooling API for each supported type's `LastModifiedDate`, compares against the local `last_indexed_at`, and only retrieves the components that are new or changed. Components no longer in the org are pruned from the index. Unchanged components are skipped entirely. This makes post-deploy refreshes cheap — typically zero API retrieve traffic when nothing has changed.
+
+ApexClass and ApexTrigger support delta. Other supported types (CustomObject and its CustomFields) fall back to full retrieve in the same call.
+
+**Do not call this routinely at the start of a session.** Even a no-op delta still hits the org's Tooling API. Call it on-demand: after a Phase 2 deploy that changed source, when an index lookup misses something the user clearly says exists, or when the user explicitly notes the org changed since last refresh.
+
+Use `full_refresh=true` only as an escape hatch — e.g. after a parser change or schema migration that means existing rows need to be re-parsed regardless of whether the org changed.
 
 Read-only. No approval required.
 
 Parameters:
 - `component_types` (optional): Array of metadata types to refresh — e.g. `["ApexClass", "ApexTrigger"]`. Omit to refresh all supported types. Narrowing the scope is recommended when you only care about specific types (e.g. after deploying a single trigger).
+- `full_refresh` (optional, default `false`): Bypass delta and re-fetch every component for the requested types.
 
 ### code_lint
 Runs static analysis on Apex or LWC code using PMD (Apex) and ESLint (LWC). Returns violations with severity, line number, and suggested fix.
