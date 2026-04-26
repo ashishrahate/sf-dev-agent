@@ -106,20 +106,37 @@ The agent uses a **plan → approve → execute** pattern:
 
 ---
 
-## Current Phase: Week 1–2
+## Current Phase: Memory tiers (Week 9-10) — planned, not yet built
 
-**Goal:** Get the basic agent loop working against a Salesforce scratch org. Prove the agent can reason about a task, produce a plan, and (after approval) write and deploy Apex code.
+The hybrid context engine and the retrieval orchestrator from the architecture above are **all built** as of 2026-04-27. The next phase is stateful memory.
 
-### Week 1–2 Deliverables
-1. System prompt (complete — see `src/sf_dev_agent/prompts/system_prompt.md`)
-2. Agent loop with ReAct pattern (plan → approve → execute)
-3. Core tool implementations: `sf_metadata_describe`, `sf_soql_query`, `sf_retrieve`, `sf_source_deploy`, `sf_test_run`, `file_write`, `file_read`, `bash`
-4. Basic task state machine (PLANNING → AWAITING_APPROVAL → EXECUTING → COMPLETE/FAILED)
-5. CLI interface for local testing
-6. Integration test against a Salesforce scratch org
+### Shipped
 
-### Future Phases
-- **Week 3–4:** Metadata index (Layer 2) + org sync service
-- **Week 5–6:** Code vector store (Layer 1) + semantic code search
-- **Week 7–8:** Plan/approve/execute UI + approval state machine
-- **Week 9–10:** Stateful project memory + knowledge base (Layer 3)
+| Phase | Wave | Status | Notes |
+|---|---|---|---|
+| Week 1-2: Agent core | — | ✅ | ReAct loop, plan→approve→execute, sf CLI tool wrappers |
+| Week 3-4: Metadata index (Layer 2) | Wave 1 | ✅ | SQLite, generic schema, `MetadataIndex`, ApexClass/ApexTrigger/CustomObject parsers |
+| Week 3-4: Tool wiring | Wave 2 | ✅ | `code_search`, `sf_dependency_graph`, `build_metadata_index` |
+| Week 3-4: Apex REFERENCES edges | Wave 2c | ✅ | Class-to-class reference graph |
+| Week 5-6: Code vector store (Layer 1) | Wave 3 | ✅ | Gemini `gemini-embedding-001`, hash-gated re-embedding, `semantic_search` |
+| Week 5-6: Delta refresh | Wave 4 | ✅ | Tooling-API LastModifiedDate diff, type-isolated deletion |
+| Week 5-6: Knowledge base (Layer 3) | Wave 5 | ✅ | 32 hand-authored entries, `knowledge_search`, `embed_knowledge_base` |
+| Week 5-6: CustomObject delta | Wave 6 | ✅ | Merged object + max-field timestamps; FK CASCADE on parent delete |
+| Week 5-6: Retrieval Orchestrator | Wave 7 | ✅ | `retrieve_context` fans out to all three layers + 1-hop graph enrichment |
+
+Default `pytest` runs **113 tests**; integration + smoke (live-org) suites bring the total to 120.
+
+### Next: Memory tiers (Week 9-10)
+
+Designed against Claude Code's auto-memory practices but with SQLite + vector recall instead of file-per-fact, because the SF agent will accumulate thousands of memories across orgs and sessions. See `docs/sessions/2026-04-26.md` Wave 8 entry for the full design.
+
+- **Working memory:** session conversation + plan snapshots persisted to SQLite (resume-from-crash).
+- **Project memory:** `decision / preference / constraint / note` rows with `Why:` + `How to apply:` body convention from Claude Code, scoped by `org_alias`, surfaced through `retrieve_context` as a fourth source.
+- **Learning memory:** flagged Project memories exportable to `context/knowledge/entries/` for cross-tenant reuse. Manual curation, not automatic.
+
+### Held / on-deck
+
+- Plan/approve/execute UI (Week 7-8) — backend state machine works; UI is product-layer, deferred until after memory.
+- Real-org pressure test of the orchestrator + delta refresh — held until a real client org is available.
+- Standard-object delta (Account, Contact extension fields) — needs an EntityDefinition pivot.
+- ValidationRule / RecordType / ListView delta — generic story, different parser + Tooling object each.
