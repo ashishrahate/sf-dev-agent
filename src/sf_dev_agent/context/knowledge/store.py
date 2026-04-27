@@ -124,7 +124,7 @@ def _parse_frontmatter_lines(fm_text: str) -> dict[str, Any]:
         # block-list continuation
         if line.startswith(("  -", "\t-")) and current_list_key:
             value = line.lstrip(" \t-").strip()
-            result.setdefault(current_list_key, []).append(value)
+            result.setdefault(current_list_key, []).append(_unquote_list_item(value))
             continue
         # key: value
         if ":" in line:
@@ -142,14 +142,34 @@ def _parse_frontmatter_lines(fm_text: str) -> dict[str, Any]:
 
 
 def _parse_inline_value(value: str) -> Any:
+    # JSON-style quoted scalar — used by the memory exporter for any value
+    # that contains YAML-significant chars (colons, brackets, etc.). Lets
+    # us round-trip rich content without a full YAML library.
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
+    if value == "null":
+        return None
     if value.startswith("[") and value.endswith("]"):
         inner = value[1:-1].strip()
         if not inner:
             return []
-        return [item.strip() for item in inner.split(",")]
+        return [_unquote_list_item(item.strip()) for item in inner.split(",")]
     if value.lower() in ("true", "false"):
         return value.lower() == "true"
     return value
+
+
+def _unquote_list_item(item: str) -> str:
+    """Strip JSON-style quoting from a single inline-list element."""
+    if len(item) >= 2 and item.startswith('"') and item.endswith('"'):
+        try:
+            return json.loads(item)
+        except json.JSONDecodeError:
+            return item
+    return item
 
 
 # ---------------------------------------------------------------------------

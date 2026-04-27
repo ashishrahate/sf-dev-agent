@@ -101,6 +101,11 @@ def main() -> None:
         run_setup()
         return
 
+    # Special-case the memory subcommand — uses its own argparse + dispatch.
+    if len(sys.argv) >= 2 and sys.argv[1] == "memory":
+        from sf_dev_agent.memory_cli import run_memory_command
+        sys.exit(run_memory_command(sys.argv[2:]))
+
     args = parse_args()
 
     logging.basicConfig(
