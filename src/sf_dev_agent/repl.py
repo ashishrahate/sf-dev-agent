@@ -123,7 +123,14 @@ class ReplSession:
             return ReplDirective.CONTINUE
 
     def _dispatch_agent(self, line: str) -> ReplDirective:
-        """Run the agent against `line` as a fresh task."""
+        """Run the agent against `line` as a fresh task.
+
+        After the run completes, check `agent.resume_requested` — if the
+        LLM called `request_resume(task_id)` mid-run, hand off to
+        `AgentLoop.resume(task_id)` so the user lands back in the
+        resumed task without typing a second command. This implements
+        the C.4 resume-by-intent flow.
+        """
         try:
             agent = AgentLoop(
                 org=self.org,
@@ -135,6 +142,34 @@ class ReplSession:
             task = agent.run(line)
             if task is not None:
                 self.completed_task_ids.append(task.task_id)
+
+            # Resume hand-off — the agent signaled it wants the REPL to
+            # pick up another task. Loop here so a chain of resumes is
+            # possible (rare, but cheap to support).
+            while agent.resume_requested is not None:
+                target_task_id = agent.resume_requested
+                console.print(
+                    f"\n[cyan]Resuming task {target_task_id} as requested...[/cyan]"
+                )
+                if self.working_memory is None:
+                    console.print(
+                        "[red]Cannot resume — REPL has no working memory store.[/red]"
+                    )
+                    break
+                resumed = AgentLoop.resume(
+                    task_id=target_task_id,
+                    org=self.org,
+                    provider=self.provider,
+                    working_memory=self.working_memory,
+                    mock_org=self.mock_org,
+                )
+                if resumed is not None:
+                    self.completed_task_ids.append(resumed.task_id)
+                # `resume()` reuses the AgentLoop machinery but constructs
+                # a fresh inner AgentLoop, so its resume_requested flag
+                # belongs to that inner instance — this loop's `agent`
+                # object's flag is one-shot. Break to avoid a tight loop.
+                break
         except KeyboardInterrupt:
             console.print(
                 "\n[yellow]Interrupted.[/yellow] Task state up to this "

@@ -47,6 +47,9 @@ READ_ONLY_TOOLS = frozenset({
     "memory_recall",
     "file_read",
     "submit_plan",
+    "list_resumable_tasks",
+    "get_task_summary",
+    "request_resume",
 })
 
 # Tools that always require plan approval before execution
@@ -84,7 +87,9 @@ class AgentLoop:
         self.org = org
         self.provider = provider
         self.max_iterations = max_iterations
-        self.tool_registry = ToolRegistry(org=org, mock_org=mock_org)
+        self.tool_registry = ToolRegistry(
+            org=org, mock_org=mock_org, working_memory=working_memory,
+        )
         self.working_memory = working_memory
         # Streaming = render assistant text deltas live as they arrive
         # from the provider. The REPL turns this on; one-shot CLI keeps
@@ -97,6 +102,10 @@ class AgentLoop:
         self.conversation: ConversationLog = ConversationLog(task_id="")
         self.current_task: Task | None = None
         self.plan_approved = False
+        # Set when the LLM calls `request_resume` — the REPL reads this
+        # after run() returns and triggers AgentLoop.resume() on it. The
+        # value is the requested task_id; None means "no resume signal".
+        self.resume_requested: str | None = None
 
         # Compute index-freshness once at construction. The REPL can refresh
         # the prompt later via /index or by recreating the AgentLoop.
@@ -447,6 +456,16 @@ class AgentLoop:
                 ]
                 self.conversation.append({"role": "user", "content": tool_results})
 
+                # Resume hand-off: if the LLM called request_resume, end
+                # this run after the confirmation tool_result is recorded.
+                # The REPL looks at self.resume_requested next.
+                if self.resume_requested is not None:
+                    logger.info(
+                        "Agent loop ending — resume requested for task %s",
+                        self.resume_requested,
+                    )
+                    break
+
                 if response.stop_reason == "end_turn":
                     logger.info("Agent signaled end_turn in %s phase", phase)
                     break
@@ -497,6 +516,12 @@ class AgentLoop:
         if tool_name == "submit_plan":
             return self._handle_submit_plan(tool_input, tool_use_id)
 
+        # request_resume is also intercepted: record the signal, return a
+        # synthetic success, and let the loop body see resume_requested
+        # on the next iteration check so it stops cleanly.
+        if tool_name == "request_resume":
+            return self._handle_request_resume(tool_input, tool_use_id)
+
         if tool_name in WRITE_TOOLS and phase == "planning":
             msg = (
                 f"Tool '{tool_name}' is a write operation and cannot execute "
@@ -542,6 +567,63 @@ class AgentLoop:
     # ------------------------------------------------------------------
     # Plan presentation and approval
     # ------------------------------------------------------------------
+
+    def _handle_request_resume(
+        self, tool_input: dict[str, Any], tool_use_id: str
+    ) -> dict[str, Any]:
+        """Record the resume signal so the REPL can pick it up.
+
+        We don't actually swap into the resumed task here — that's the
+        REPL's job once `run()` returns. We just stamp the requested
+        task_id on `self.resume_requested` and return a tool_result so
+        the model sees a clean confirmation (not an error).
+        """
+        task_id = tool_input.get("task_id")
+        if not task_id:
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": "ERROR: request_resume requires a task_id",
+                "is_error": True,
+            }
+
+        # Defensive: confirm the task exists + is in scope, so we don't
+        # set the signal on a typo and confuse the REPL.
+        if self.working_memory is not None:
+            row = self.working_memory.get_task(task_id)
+            if row is None:
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": f"ERROR: task {task_id!r} not found",
+                    "is_error": True,
+                }
+            if row.tenant_id != self.org.tenant_id:
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": (
+                        f"ERROR: task {task_id!r} belongs to a different "
+                        "tenant; cannot resume."
+                    ),
+                    "is_error": True,
+                }
+
+        self.resume_requested = task_id
+        rationale = tool_input.get("rationale", "")
+        console.print(
+            f"  [cyan]Resume requested[/cyan] -> "
+            f"task={task_id} rationale={rationale!r}"
+        )
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": json.dumps({
+                "resume_signaled": True,
+                "task_id": task_id,
+                "next": "REPL will hand off to AgentLoop.resume()",
+            }),
+        }
 
     def _handle_submit_plan(
         self, tool_input: dict[str, Any], tool_use_id: str

@@ -18,6 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from sf_dev_agent.memory.working import WorkingMemoryStore
 from sf_dev_agent.models.schemas import OrgConnection, ToolDefinition
 from sf_dev_agent.paths import agent_workspace
 
@@ -50,10 +51,15 @@ class ToolRegistry:
         org: OrgConnection,
         mock_org: bool = False,
         index_db_path: Path | None = None,
+        working_memory: WorkingMemoryStore | None = None,
     ) -> None:
         self.org = org
         self.mock_org = mock_org
         self.index_db_path = index_db_path  # None -> default location resolved lazily
+        # Optional handle on the running agent's WorkingMemoryStore. The
+        # resume tools (list_resumable_tasks, get_task_summary,
+        # request_resume) need it; everything else degrades gracefully.
+        self.working_memory = working_memory
         self._tools: dict[str, ToolDefinition] = {}
         self._executors: dict[str, Callable[..., Any]] = {}
 
@@ -997,6 +1003,119 @@ class ToolRegistry:
                 read_only=True,
             ),
             executor=self._exec_build_metadata_index,
+        )
+
+        # --- list_resumable_tasks (read-only browse of working memory) ---
+        self.register(
+            ToolDefinition(
+                name="list_resumable_tasks",
+                description=(
+                    "List in-flight tasks the user could resume — anything "
+                    "in working memory whose status is NOT terminal "
+                    "(complete / failed / rolled_back). Scoped to the "
+                    "current (tenant, org) automatically. Use this when "
+                    "the user asks 'what was I working on?' or signals "
+                    "they want to pick something back up.\n\n"
+                    "Returns task ids, statuses, abbreviated user requests, "
+                    "and rough message counts so you can summarize options. "
+                    "If you need the transcript head for a specific task, "
+                    "follow up with get_task_summary(task_id)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max rows (default 10, max 50).",
+                            "default": 10,
+                        },
+                        "include_terminal": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, also include completed/failed "
+                                "tasks (read-only history view). Default "
+                                "false — resumable tasks only."
+                            ),
+                            "default": False,
+                        },
+                    },
+                },
+                read_only=True,
+            ),
+            executor=self._exec_list_resumable_tasks,
+        )
+
+        # --- get_task_summary (read transcript head for one task) -------
+        self.register(
+            ToolDefinition(
+                name="get_task_summary",
+                description=(
+                    "Return the head of one task's conversation transcript "
+                    "plus its plan + status. Use this to confirm with the "
+                    "user that you're picking up the right task before "
+                    "calling request_resume.\n\n"
+                    "Truncates message bodies aggressively — this is a "
+                    "summary, not a full replay."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "Task id from list_resumable_tasks.",
+                        },
+                        "max_messages": {
+                            "type": "integer",
+                            "description": "How many transcript rows to include (default 6, max 25).",
+                            "default": 6,
+                        },
+                    },
+                    "required": ["task_id"],
+                },
+                read_only=True,
+            ),
+            executor=self._exec_get_task_summary,
+        )
+
+        # --- request_resume (intercepted — REPL takes over and resumes) -
+        # Schema exposed to the LLM; the AgentLoop intercepts the call and
+        # signals back to the REPL. This executor is never invoked.
+        self.register(
+            ToolDefinition(
+                name="request_resume",
+                description=(
+                    "Hand off control to the user's REPL to resume the "
+                    "named task. Call this ONLY after you've confirmed "
+                    "(via list_resumable_tasks + the user's intent) that "
+                    "this is the task they want to continue.\n\n"
+                    "After this call, the current agent run ends and the "
+                    "REPL re-invokes AgentLoop.resume(task_id) to pick up "
+                    "where the prior session left off — using the saved "
+                    "transcript, plan, and approval state. Don't keep "
+                    "talking after calling this; just confirm briefly and "
+                    "stop."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "ID of the task to resume.",
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "description": (
+                                "One sentence explaining why this task "
+                                "matches the user's request. Useful for "
+                                "the operator log."
+                            ),
+                        },
+                    },
+                    "required": ["task_id"],
+                },
+                read_only=True,
+            ),
+            executor=lambda **_: {"intercepted": True},  # never reached
         )
 
         # --- submit_plan ---
@@ -1944,4 +2063,148 @@ class ToolRegistry:
                 }
                 for h in filtered
             ],
+        }
+
+    # ------------------------------------------------------------------
+    # Resume-by-LLM-intent (Phase C.4)
+    # ------------------------------------------------------------------
+
+    def _resume_unavailable(self) -> dict[str, Any]:
+        """Shared error for the read-only resume tools when WM is missing."""
+        return {
+            "error": (
+                "No working memory store is attached to this agent run, "
+                "so resumable tasks can't be inspected. This usually means "
+                "the agent was constructed without persistence — start the "
+                "REPL again or pass --working-memory."
+            ),
+            "tasks": [],
+        }
+
+    def _exec_list_resumable_tasks(
+        self,
+        limit: int = 10,
+        include_terminal: bool = False,
+    ) -> dict[str, Any]:
+        """List tasks the user could resume, scoped to the current org."""
+        from sf_dev_agent.memory.working import TERMINAL_STATUSES
+
+        if self.working_memory is None:
+            return self._resume_unavailable()
+
+        limit = max(1, min(limit, 50))
+        scope = self._memory_scope()
+
+        try:
+            rows = self.working_memory.list_tasks(scope=scope, limit=limit * 2)
+        except Exception as exc:
+            return {"error": f"list_tasks failed: {type(exc).__name__}: {exc}"}
+
+        if not include_terminal:
+            rows = [r for r in rows if r.status not in TERMINAL_STATUSES]
+
+        rows = rows[:limit]
+
+        tasks_out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                msg_count = self.working_memory.message_count(r.id)
+            except Exception:
+                msg_count = -1
+            tasks_out.append({
+                "task_id": r.id,
+                "status": r.status,
+                "user_request": (
+                    r.user_request[:200] + "..."
+                    if len(r.user_request) > 200 else r.user_request
+                ),
+                "plan_approved": r.plan_approved,
+                "has_plan": r.plan_json is not None,
+                "messages": msg_count,
+                "updated_at": r.updated_at,
+            })
+
+        return {
+            "tenant_id": scope.tenant_id,
+            "org_alias": scope.org_alias,
+            "include_terminal": include_terminal,
+            "count": len(tasks_out),
+            "tasks": tasks_out,
+            "note": (
+                "Use get_task_summary(task_id) for transcript context, "
+                "then request_resume(task_id) to hand off to the REPL."
+            ) if tasks_out else (
+                "No resumable tasks in scope. The user has no in-flight "
+                "work to pick up under this org."
+            ),
+        }
+
+    def _exec_get_task_summary(
+        self,
+        task_id: str,
+        max_messages: int = 6,
+    ) -> dict[str, Any]:
+        """Return a concise summary of one persisted task."""
+        if self.working_memory is None:
+            return self._resume_unavailable()
+
+        max_messages = max(1, min(max_messages, 25))
+        row = self.working_memory.get_task(task_id)
+        if row is None:
+            return {"error": f"task {task_id!r} not found"}
+
+        scope = self._memory_scope()
+        if row.tenant_id != scope.tenant_id:
+            return {
+                "error": (
+                    f"task {task_id!r} belongs to a different tenant; "
+                    "refusing to summarize."
+                ),
+            }
+
+        try:
+            messages = self.working_memory.load_messages(task_id)
+        except Exception as exc:
+            return {"error": f"load_messages failed: {type(exc).__name__}: {exc}"}
+
+        # Compact each message: role + truncated string repr of content.
+        head = messages[:max_messages]
+        compact: list[dict[str, Any]] = []
+        for m in head:
+            content = m.get("content")
+            if isinstance(content, str):
+                snippet = content[:300] + ("..." if len(content) > 300 else "")
+            else:
+                # Lists of typed blocks (assistant / tool_result). Pull the
+                # first text block if there is one; otherwise type names.
+                snippet_parts: list[str] = []
+                for block in content if isinstance(content, list) else []:
+                    btype = block.get("type") if isinstance(block, dict) else None
+                    if btype == "text":
+                        text = block.get("text", "")
+                        snippet_parts.append(text[:200])
+                    elif btype == "tool_use":
+                        snippet_parts.append(
+                            f"[tool_use {block.get('name', '?')}]"
+                        )
+                    elif btype == "tool_result":
+                        snippet_parts.append("[tool_result]")
+                    else:
+                        snippet_parts.append(f"[{btype or 'unknown'}]")
+                snippet = " | ".join(snippet_parts)[:300]
+            compact.append({"role": m["role"], "content": snippet})
+
+        return {
+            "task_id": row.id,
+            "status": row.status,
+            "user_request": row.user_request,
+            "plan_approved": row.plan_approved,
+            "has_plan": row.plan_json is not None,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+            "completed_at": row.completed_at,
+            "error": row.error,
+            "message_count": len(messages),
+            "head": compact,
+            "truncated": len(messages) > max_messages,
         }
