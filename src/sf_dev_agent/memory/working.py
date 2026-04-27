@@ -233,9 +233,12 @@ class WorkingMemoryStore:
             clauses.append("status = ?")
             params.append(status)
 
+        # Tiebreaker on `id DESC` for tasks created in the same second —
+        # without it, list_tasks ordering becomes implementation-defined and
+        # things like resume --latest get flaky in tests + fast scripts.
         sql = (
             f"SELECT * FROM tasks WHERE {' AND '.join(clauses)} "
-            "ORDER BY created_at DESC LIMIT ?"
+            "ORDER BY created_at DESC, id DESC LIMIT ?"
         )
         rows = self._conn.execute(sql, (*params, limit)).fetchall()
         return [_row_to_task(r) for r in rows]

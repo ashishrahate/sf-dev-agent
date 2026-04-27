@@ -111,6 +111,11 @@ def main() -> None:
         from sf_dev_agent.doctor import main as doctor_main
         sys.exit(doctor_main(sys.argv[2:]))
 
+    # Special-case the resume subcommand — pick up a persisted task.
+    if len(sys.argv) >= 2 and sys.argv[1] == "resume":
+        from sf_dev_agent.resume_cli import run_resume_command
+        sys.exit(run_resume_command(sys.argv[2:]))
+
     args = parse_args()
 
     logging.basicConfig(
