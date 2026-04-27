@@ -60,6 +60,28 @@ MEMORY_TYPES: frozenset[str] = frozenset({"user", "feedback", "project", "refere
 
 
 # ---------------------------------------------------------------------------
+# Decay scoring constants (Wave 8 slice 2c)
+# ---------------------------------------------------------------------------
+#
+# `recall()` blends cosine similarity with two soft signals from the row's
+# usage history:
+#
+#   - **Recency penalty.** Memories that haven't been accessed in a while
+#     get a small score reduction. Bounded by `DECAY_RECENCY_ALPHA`.
+#   - **Usage boost.** Memories accessed many times get a small score
+#     increase. Saturates around `DECAY_USAGE_K` accesses; bounded by
+#     `DECAY_USAGE_ALPHA`.
+#
+# The cosine score is the dominant signal — decay is a tie-breaker, not a
+# replacement. Combined adjustment is clipped so the final score stays in
+# [0, 1] (the orchestrator's expected range).
+DECAY_HALF_LIFE_DAYS: float = 30.0   # half the recency penalty after 30 days unused
+DECAY_RECENCY_ALPHA: float = 0.10    # max -10% nudge for stale rows
+DECAY_USAGE_K: float = 5.0           # access count where usage boost saturates
+DECAY_USAGE_ALPHA: float = 0.05      # max +5% boost for hot rows
+
+
+# ---------------------------------------------------------------------------
 # Public dataclasses
 # ---------------------------------------------------------------------------
 
@@ -368,11 +390,22 @@ class MemoryStore:
         type: str | None = None,
         limit: int = 10,
         include_superseded: bool = False,
+        decay: bool = True,
     ) -> list[MemoryRecallHit]:
-        """Cosine-sim ranking over scope-matching memories with an embedding.
+        """Cosine-sim ranking with optional decay-score blending.
 
-        Side effect: bumps `last_accessed_at` and `access_count` on every row
-        returned. This feeds the decay scoring planned for slice 2.
+        With `decay=True` (default), the returned `score` blends cosine
+        similarity with `last_accessed_at` (recency penalty) and
+        `access_count` (usage boost). See the `DECAY_*` module constants for
+        the soft-signal magnitudes. The cosine score remains dominant —
+        decay is a tie-breaker, not a replacement.
+
+        Side effect: bumps `last_accessed_at` and `access_count` on every
+        row returned, regardless of `decay`.
+
+        Args:
+            decay: when False, returns pure cosine scores. Useful for
+                deterministic tests and ranking-correctness assertions.
         """
         query = np.asarray(query_embedding, dtype=np.float32)
         norm = np.linalg.norm(query)
@@ -396,6 +429,18 @@ class MemoryStore:
         matrix = matrix / norms
 
         scores = matrix @ query
+
+        # Decay blending. Sort against the *adjusted* scores so the soft
+        # signals participate in the top-K selection, not just labeling.
+        if decay:
+            now = datetime.now(UTC)
+            adjustments = np.array(
+                [_decay_factor(r, now) for r in rows], dtype=np.float32,
+            )
+            # Multiplicative blend: score = cosine * (1 + adjustment).
+            # Clip to [0, 1] so the public contract (the orchestrator
+            # expects normalized scores) holds.
+            scores = np.clip(scores * (1.0 + adjustments), 0.0, 1.0)
 
         if len(scores) <= limit:
             top_idx = np.argsort(-scores)
@@ -468,6 +513,43 @@ class MemoryStore:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _decay_factor(row: sqlite3.Row, now: datetime) -> float:
+    """Compose recency penalty + usage boost into a single multiplicative
+    adjustment for the row's cosine score.
+
+    Recency: `exp(-age_days / half_life)` decays from 1.0 (just accessed)
+    toward 0 (very stale). The penalty equals `-RECENCY_ALPHA * (1 - decay)`,
+    so a brand-new row has 0 penalty and a forever-stale row caps at
+    `-RECENCY_ALPHA`.
+
+    Usage: `1 - exp(-count / k)` saturates from 0 (never used) toward 1
+    (used many times). The boost equals `USAGE_ALPHA * (1 - exp(-count/k))`.
+
+    The two combine additively, then are clipped at the recall site so the
+    final adjusted cosine stays in [0, 1].
+    """
+    last = row["last_accessed_at"]
+    if last:
+        try:
+            last_dt = datetime.fromisoformat(last)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=UTC)
+            age_seconds = max(0.0, (now - last_dt).total_seconds())
+        except ValueError:
+            age_seconds = 0.0
+    else:
+        age_seconds = 0.0
+
+    age_days = age_seconds / 86400.0
+    recency_decay = float(np.exp(-age_days / DECAY_HALF_LIFE_DAYS))
+    recency_penalty = -DECAY_RECENCY_ALPHA * (1.0 - recency_decay)
+
+    count = row["access_count"] if row["access_count"] is not None else 0
+    usage_boost = DECAY_USAGE_ALPHA * (1.0 - float(np.exp(-count / DECAY_USAGE_K)))
+
+    return recency_penalty + usage_boost
 
 
 def _scope_clause(

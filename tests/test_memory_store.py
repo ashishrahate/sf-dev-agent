@@ -435,3 +435,172 @@ def test_memory_save_cross_org_drops_org_alias(
     })
     assert resp["saved"] is True
     assert resp["org_alias"] is None
+
+
+# ---------------------------------------------------------------------------
+# Decay scoring (Wave 8 slice 2c)
+# ---------------------------------------------------------------------------
+
+def _age_memory_in_days(store: MemoryStore, memory_id: str, age_days: float) -> None:
+    """Backdate the row's last_accessed_at so decay tests don't have to wait."""
+    from datetime import UTC, datetime, timedelta
+    backdated = (datetime.now(UTC) - timedelta(days=age_days)).isoformat(
+        timespec="seconds"
+    )
+    store._conn.execute(
+        "UPDATE memories SET last_accessed_at = ? WHERE id = ?",
+        (backdated, memory_id),
+    )
+    store._conn.commit()
+
+
+def test_decay_off_preserves_pure_cosine(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """decay=False keeps ranking driven only by cosine similarity."""
+    embedder = MockEmbedder(dim=64)
+    fresh = store.save(scope=scope, type="feedback", name="fresh-match",
+                       description="exact match", body="duplicate account email phone")
+    stale = store.save(scope=scope, type="feedback", name="stale-match",
+                       description="exact match", body="duplicate account email phone")
+    store.embed_pending(embedder)
+
+    # Stale row hasn't been touched in a year.
+    _age_memory_in_days(store, stale.id, age_days=365)
+
+    # Same content -> cosine ties; without decay, the order is determined
+    # by numpy's argsort on equal values (stable).
+    query_vec = embedder.embed_one("duplicate account email phone")
+    pure = store.recall(query_vec, scope=scope, limit=2, decay=False)
+    assert {h.record.id for h in pure} == {fresh.id, stale.id}
+    # Pure cosine ties — both scores equal.
+    assert abs(pure[0].score - pure[1].score) < 1e-6
+
+
+def test_decay_penalizes_stale_memory_over_fresh(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """At equal cosine, the stale row scores lower than the fresh row."""
+    embedder = MockEmbedder(dim=64)
+    fresh = store.save(scope=scope, type="feedback", name="fresh",
+                       description="dup detection", body="duplicate account email phone")
+    stale = store.save(scope=scope, type="feedback", name="stale",
+                       description="dup detection", body="duplicate account email phone")
+    store.embed_pending(embedder)
+    _age_memory_in_days(store, stale.id, age_days=365)
+
+    query_vec = embedder.embed_one("duplicate account email phone")
+    hits = store.recall(query_vec, scope=scope, limit=2)  # decay default on
+
+    by_id = {h.record.id: h.score for h in hits}
+    assert by_id[fresh.id] > by_id[stale.id], (
+        "Fresh memory must outscore stale memory at equal cosine"
+    )
+    # Stale penalty caps at ~10% — sanity check magnitude.
+    assert by_id[fresh.id] - by_id[stale.id] <= 0.15
+
+
+def test_decay_boosts_high_usage_over_low_usage(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """At equal cosine + same age, more accesses ranks higher."""
+    embedder = MockEmbedder(dim=64)
+    cold = store.save(scope=scope, type="feedback", name="cold",
+                      description="dup detection", body="duplicate account email phone")
+    hot = store.save(scope=scope, type="feedback", name="hot",
+                     description="dup detection", body="duplicate account email phone")
+    store.embed_pending(embedder)
+
+    # Manually set access_count without changing last_accessed_at.
+    store._conn.execute(
+        "UPDATE memories SET access_count = ? WHERE id = ?", (10, hot.id),
+    )
+    store._conn.commit()
+
+    query_vec = embedder.embed_one("duplicate account email phone")
+    hits = store.recall(query_vec, scope=scope, limit=2)
+
+    by_id = {h.record.id: h.score for h in hits}
+    assert by_id[hot.id] > by_id[cold.id], (
+        "Hot (high access_count) memory must outscore cold one at equal cosine"
+    )
+    # Usage boost caps at ~5%.
+    assert by_id[hot.id] - by_id[cold.id] <= 0.10
+
+
+def test_decay_keeps_score_in_unit_range(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """Adjusted scores must remain in [0, 1] — orchestrator contract."""
+    embedder = MockEmbedder(dim=64)
+    store.save(scope=scope, type="user", name="hot",
+               description="x", body="content here")
+    store.embed_pending(embedder)
+
+    # Crank access_count well past saturation.
+    store._conn.execute(
+        "UPDATE memories SET access_count = 1000",
+    )
+    store._conn.commit()
+
+    query_vec = embedder.embed_one("content here")
+    hits = store.recall(query_vec, scope=scope, limit=5)
+    for h in hits:
+        assert 0.0 <= h.score <= 1.0
+
+
+def test_decay_cosine_dominates_over_decay_signal(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """A high-cosine stale memory must still beat a low-cosine fresh one."""
+    embedder = MockEmbedder(dim=64)
+    relevant_stale = store.save(
+        scope=scope, type="feedback", name="relevant-but-old",
+        description="duplicate account detection",
+        body="duplicate account detection email phone match",
+    )
+    store.save(
+        scope=scope, type="feedback", name="unrelated-fresh",
+        description="invoice tax", body="invoice tax calculation regional rules",
+    )
+    store.embed_pending(embedder)
+    _age_memory_in_days(store, relevant_stale.id, age_days=365)
+
+    query_vec = embedder.embed_one("duplicate account detection email phone match")
+    hits = store.recall(query_vec, scope=scope, limit=5)
+    assert hits[0].record.id == relevant_stale.id, (
+        "Cosine relevance must dominate the small decay penalty"
+    )
+
+
+def test_decay_via_orchestrator_layer(
+    tmp_path: Path, scope: MemoryScope
+) -> None:
+    """retrieve_context's memory layer inherits decay from MemoryStore.recall."""
+    from sf_dev_agent.context import retrieve_context
+
+    db = tmp_path / "decay_orch.db"
+    embedder = MockEmbedder(dim=64)
+    with MemoryStore(db) as store:
+        store.save(scope=scope, type="feedback", name="fresh-pref",
+                   description="dup detection", body="duplicate account email")
+        stale = store.save(scope=scope, type="feedback", name="stale-pref",
+                           description="dup detection", body="duplicate account email")
+        store.embed_pending(embedder)
+        _age_memory_in_days(store, stale.id, age_days=365)
+
+    # Need an empty index for retrieve_context's existence check.
+    from sf_dev_agent.context import MetadataIndex
+    MetadataIndex(db).close()
+
+    result = retrieve_context(
+        query="duplicate account email",
+        db_path=db,
+        embedder=embedder,
+        memory_scope=scope,
+        max_tokens=8000,
+    )
+    mem_hits = [h for h in result.hits if h.source == "memory"]
+    assert len(mem_hits) == 2
+    by_title = {h.title: h.score for h in mem_hits}
+    assert by_title["fresh-pref"] > by_title["stale-pref"]
