@@ -19,6 +19,7 @@ all = ["anthropic>=0.97.0", "openai>=1.0.0", "google-genai>=1.0.0"]
 
 [project.scripts]
 sf-agent = "sf_dev_agent.__main__:main"
+sfagent = "sf_dev_agent.__main__:main"
 
 [dependency-groups]
 dev = [

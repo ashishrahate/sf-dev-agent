@@ -283,3 +283,170 @@ Update this document as items land. The convention:
 - ❌ for items that were planned but explicitly cancelled (with a reason).
 
 Empty checkbox = not started.
+
+---
+
+# Addendum — 2026-04-27: confirmed scope for phase B + C
+
+After reviewing Part 2, the user locked the following decisions. **This addendum supersedes Part 2 only where it conflicts; otherwise both documents stand.** Any item in Part 2 not re-listed here is unchanged.
+
+## Locked decisions
+
+| Question | Answer |
+|---|---|
+| Add `sfagent` no-hyphen alias? | ✅ Yes — landed alongside this addendum (`pyproject.toml`). |
+| Resume-by-intent: regex v1 or LLM classification? | LLM classification, **as an intercepted tool call**, from day one. |
+| Auto-warm prompt: soft or hard? | Soft — `[yes / skip / no-and-stop-asking]`. |
+| Roadmap update style? | Append (this addendum). |
+
+## Interaction model (the `claude`-binary parallel)
+
+`sf-agent` (or `sfagent`) is a single OS-shell binary. Type it once with no args → enter a persistent REPL. From inside the REPL: free-form text goes to the agent (no prefix); `/`-prefixed lines are slash commands. Identical mental model to Claude Code's `claude` binary.
+
+| Where | Type | Means |
+|---|---|---|
+| OS shell | `sf-agent` (or `sfagent`) | Launch the REPL. |
+| OS shell, scripted | `sf-agent "do X"` | One-shot for CI/scripts. Process exits when done. |
+| Inside REPL | `do X` | Free-form request. Routed to `agent.run()`. |
+| Inside REPL | `/help`, `/resume`, `/status`, … | Slash commands. |
+
+---
+
+## Phase B (revised) — ~3 days, one-shot CLI improvements
+
+Independently shippable; useful before the REPL lands.
+
+### B.1 — `sf-agent doctor` (~0.5 day)
+
+Probes Python / uv / Node / sf CLI / git / LLM API key. `rich` table output. `--install` flag for best-effort install via detected package manager (winget / brew / apt).
+
+Wired into the setup wizard (refuses to proceed on red); special-case dispatch in `__main__.py`.
+
+Files: `src/sf_dev_agent/doctor.py` (~150 LOC), `tests/test_doctor.py`.
+
+### B.2 — Auto-warm context engine + staleness check (~1 day) [SOFT prompt]
+
+**Layer A — first-run prompt:**
+- New `src/sf_dev_agent/index_freshness.py` with `IndexFreshness(last_built_at, age_seconds, is_stale, embedding_coverage_pct)`.
+- On agent startup against a new org: soft prompt `[yes / skip / no-and-stop-asking]`. **Never auto-runs** without explicit consent.
+- On `yes`: run `build_metadata_index` → `embed_metadata_index` → `embed_knowledge_base` with `rich` progress bars.
+- On `no-and-stop-asking`: write `.cache/.skip_warmup` so we never ask again for that org.
+
+**Layer B — staleness check on every task:**
+- Threshold `is_stale = age > 24h` (env-tunable via `INDEX_STALE_AFTER_HOURS`).
+- Inject one-line freshness into the agent's system prompt at runtime: `[index freshness: last built 31h ago — call build_metadata_index --delta if you suspect stale data]`.
+- Expose `check_index_freshness` as an agent-callable tool so the LLM can self-check during planning.
+
+Files: `index_freshness.py` (~100 LOC), `tools/registry.py` (new tool), `prompts/system_prompt.md` ({INDEX_FRESHNESS} placeholder).
+
+### B.3 — `sf-agent resume <task-id>` CLI verb (~0.5 day)
+
+Capability built (Wave 8 slice 2b). Only the CLI plumbing.
+
+- `sf-agent resume <task-id>` — resume that task.
+- `sf-agent resume --list` — show in-flight tasks under the current scope with their (truncated) descriptions.
+- `sf-agent resume --latest` — convenience: resume the most-recent in-flight task.
+
+Files: `src/sf_dev_agent/resume_cli.py` (~80 LOC), `__main__.py` dispatch, `tests/test_resume_cli.py`.
+
+### B.4 — Documentation refresh + alias (~0.25 day, alias already done)
+
+- ✅ `sfagent` no-hyphen alias added to `pyproject.toml` (this addendum's commit).
+- README: replace `uv run python -m sf_dev_agent` with `sf-agent` / `sfagent` everywhere it makes sense.
+- ROADMAP.md: tick off B items as they ship.
+
+---
+
+## Phase C (revised) — ~6-8 days, the persistent REPL
+
+### C.1 — REPL skeleton + 15 slash commands (~3 days)
+
+`prompt_toolkit>=3.0`. Status line at the bottom. History persisted to `~/.sf-agent/history`. Tab completion on slash commands. Multiline via Shift+Enter or trailing `\`.
+
+v1 slash commands: `/help`, `/quit`, `/exit`, `/clear`, `/status`, `/index`, `/resume`, `/tasks`, `/memory recall`, `/memory list`, `/memory extract`, `/memory export`, `/memory promote`, `/mock`, `/provider`, `/verbose`.
+
+Files: `src/sf_dev_agent/repl.py` (~400 LOC), `src/sf_dev_agent/repl_commands.py` (~300 LOC), `tests/test_repl.py`.
+
+### C.2 — Streaming output (~2 days)
+
+New abstract method `chat_stream()` on `LLMProvider` yielding `StreamChunk` events: `text_delta`, `tool_use_start`, `tool_use_delta`, `tool_use_end`, `message_stop`.
+
+Provider implementations:
+- Anthropic: `client.messages.stream(...)`.
+- OpenAI: `client.chat.completions.create(stream=True, ...)`.
+- Gemini: `model.generate_content(..., stream=True)`.
+
+REPL renders text deltas via `rich.live.Live`. One-shot CLI mode keeps non-streaming.
+
+Files: `providers/base.py`, three provider files, `agent.py` (new `_agent_loop_streaming`), `tests/test_streaming.py`.
+
+### C.3 — ESC interrupt (~0.5 day, paired with C.2)
+
+`prompt_toolkit` key bindings. ESC sets `self._interrupt_requested`; streaming loop checks between chunks; agent emits a synthetic `<user pressed ESC; interrupted>` message into the conversation; control returns to the prompt. In-flight tool calls finish (usually fast).
+
+Files: `repl.py` (key binding + flag wiring), `agent.py` (interrupt-aware loop).
+
+### C.4 — Resume-by-intent as an LLM tool call (~1 day)
+
+**Architecture: three tools, one of them intercepted.** Mirrors the existing `submit_plan` pattern.
+
+| Tool | Read-only? | Routed to |
+|---|---|---|
+| `list_resumable_tasks()` → list of `{task_id, description, status, age}` for in-flight tasks in scope | yes | normal registry executor |
+| `get_task_summary(task_id)` → `{user_request, status, plan_summary, message_count, last_active}` | yes | normal registry executor |
+| `request_resume(task_id)` → no return; signals the REPL to switch loops | yes | **intercepted by the REPL** before the registry sees it |
+
+**Flow when the user types "resume what we were working on" inside the REPL:**
+
+1. Free-form input goes to `agent.run()` as normal — no pre-flight classifier, no second LLM call.
+2. The agent's planning step sees the input, sees the three resume tools in its tool set, and chooses to call `list_resumable_tasks()`.
+3. Tool returns: `[{id: task_abc, description: "Build a dedup trigger for Account", status: awaiting_approval, age: 12m}, ...]`.
+4. Agent (LLM) reads the result and asks the user naturally: "I see one in-flight task — `task_abc`: 'Build a dedup trigger for Account' (awaiting approval, 12 minutes ago). Resume? [yes/no/show others]".
+5. User: "yes".
+6. Agent calls `request_resume(task_id="task_abc")`.
+7. The REPL intercepts this tool call (same hook as `submit_plan`'s special handling), tears down the current `AgentLoop`, calls `AgentLoop.resume(task_id="task_abc")`, and seamlessly continues the resumed task.
+
+**Why this beats regex:** the LLM does its own intent recognition. No second classifier model, no fragile pattern set. Phrases like "let's pick up where we left off", "continue what I was doing", "resume my deploy task" all work without enumeration.
+
+**Why this beats a free-running tool call:** the REPL owns the AgentLoop instance lifecycle. `request_resume` can't be a normal tool because resuming requires *replacing* the current loop with a new one — that's not something a tool executor can do from inside the loop it's running in. Intercepting at the tool-call boundary is the clean cut point.
+
+**Description source:** truncated `user_request` (first 80 chars) in v1. Optional v2: `tasks` table gains a `summary` column populated by a fast model at end-of-task.
+
+Files: `tools/registry.py` (three tools, one with an `intercepted=True` flag), `repl.py` (intercept hook for `request_resume`), `agent.py` (no changes — agent treats them as normal tools), `tests/test_resume_intent.py`.
+
+### C.5 — Extract nudge at `/quit` (~0.25 day)
+
+REPL tracks tasks completed during the session. On `/quit` (or `/exit`, or Ctrl+D): if any tasks completed, prompt `Run extraction across all of them? [yes/skip]`. Walks each transcript through `MemoryExtractor`. Suppression via `EXTRACT_NUDGE=off` in `.env`.
+
+One-shot CLI runs do **not** get the nudge.
+
+Files: `repl.py` (~30 LOC), `tests/test_extract_nudge.py`.
+
+### C.6 — Documentation for the REPL (~0.5 day)
+
+- README: new "Running interactively" section with a transcript.
+- ROADMAP: tick off C items.
+- A short docs page enumerating every slash command.
+
+---
+
+## Phasing summary (revised)
+
+| Phase | Items | Effort |
+|---|---|---|
+| **B** | doctor, auto-warm + staleness (soft), resume CLI verb, alias + docs | ~3 days |
+| **C** | REPL skeleton + slash commands, streaming, ESC, resume-by-intent (3-tool intercepted), extract nudge at /quit, docs | ~6-8 days |
+| **Total** | | ~9-11 focused days |
+
+**Inside each phase:**
+- B order: `doctor` → `auto-warm` → `resume CLI` → docs. Doctor first (wizard depends on it). Auto-warm second (touches startup; cleaner before REPL lands). Resume CLI is independent.
+- C order: `REPL skeleton + slash commands` → `streaming` → `ESC` → `resume-by-intent` → `extract nudge` → docs. Streaming + ESC paired. Resume-by-intent depends on streaming for the natural mid-stream tool-call interception experience.
+
+## Out of scope (reaffirmed)
+
+- `--yes` auto-approve flag.
+- Web UI.
+- CI integration without a policy engine.
+- Containerization / auth (control + execution plane work).
+- Per-task extract nudge (replaced by `/quit` variant).
+- Tab completion of memory/task IDs.
