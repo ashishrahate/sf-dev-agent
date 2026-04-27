@@ -59,6 +59,13 @@ WRITE_TOOLS = frozenset({
     "bash",
 })
 
+# Statuses that mean a task is finished and resume() should short-circuit.
+_TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset({
+    TaskStatus.COMPLETE,
+    TaskStatus.FAILED,
+    TaskStatus.ROLLED_BACK,
+})
+
 
 class AgentLoop:
     """The core agent loop implementing plan → approve → execute."""
@@ -136,50 +143,185 @@ class AgentLoop:
 
         console.print(Panel(user_request, title="[bold]Task Request", border_style="blue"))
 
-        # Phase 1: Planning loop (read-only tools allowed)
+        return self._run_planning_then_execution()
+
+    @classmethod
+    def resume(
+        cls,
+        task_id: str,
+        org: OrgConnection,
+        provider: LLMProvider,
+        working_memory: WorkingMemoryStore,
+        max_iterations: int = 50,
+        mock_org: bool = False,
+    ) -> Task:
+        """Pick up a persisted task and continue from its last status.
+
+        Loads the task row + conversation transcript, reconstructs the
+        AgentLoop state, and dispatches based on `TaskStatus`:
+
+            received / planning (no plan saved)  -> redo Phase 1, then Phase 2
+            awaiting_approval / planning + plan  -> redisplay plan, prompt
+            executing                            -> Phase 2 only (skip planning)
+            terminal (complete/failed/...)       -> short-circuit, return Task
+
+        A task with `plan_json` saved but `status=planning` is treated as
+        `awaiting_approval` — that's the most likely shape after a crash
+        between `submit_plan` and the approval prompt.
+
+        Raises:
+            ValueError if the task isn't found or belongs to a different
+            tenant than the supplied `org`.
+        """
+        row = working_memory.get_task(task_id)
+        if row is None:
+            raise ValueError(f"task {task_id!r} not found in working memory")
+        if row.tenant_id != org.tenant_id:
+            raise ValueError(
+                f"task {task_id!r} belongs to tenant {row.tenant_id!r}, "
+                f"not the current org's tenant {org.tenant_id!r}"
+            )
+
+        self = cls(
+            org=org, provider=provider,
+            max_iterations=max_iterations, mock_org=mock_org,
+            working_memory=working_memory,
+        )
+
+        # Reconstruct Task model + plan from persisted state.
+        self.current_task = Task(
+            task_id=row.id,
+            tenant_id=row.tenant_id,
+            status=TaskStatus(row.status),
+            user_request=row.user_request,
+        )
+        if row.plan_json:
+            try:
+                self.current_task.plan = self._parse_plan(json.loads(row.plan_json))
+            except Exception:
+                logger.exception(
+                    "Failed to rehydrate plan_json for task %s; treating as no plan",
+                    task_id,
+                )
+        self.plan_approved = row.plan_approved
+
+        # Seed the conversation from disk. ConversationLog.seed= pre-fills
+        # the in-memory list WITHOUT re-persisting (those rows are already
+        # there); subsequent appends go to disk normally.
+        seeded = working_memory.load_messages(task_id)
+        self.conversation = ConversationLog(
+            task_id=task_id, store=working_memory, seed=seeded,
+        )
+
+        console.print(Panel(
+            f"task_id: {task_id}\nstatus: {row.status}\n"
+            f"messages: {len(seeded)} | plan_approved: {row.plan_approved}",
+            title="[bold]Resuming task", border_style="cyan",
+        ))
+
+        status = TaskStatus(row.status)
+
+        # Terminal — nothing to do; print summary for the operator.
+        if status in _TERMINAL_TASK_STATUSES:
+            console.print(
+                f"[dim]Task is already in terminal state: {status.value}.[/dim]"
+            )
+            return self.current_task
+
+        # Already executing — skip Phase 1 entirely.
+        if status == TaskStatus.EXECUTING:
+            return self._run_execution_only(append_transition_message=False)
+
+        # Awaiting approval, OR planning with a plan saved (crash window).
+        if status == TaskStatus.AWAITING_APPROVAL or (
+            status == TaskStatus.PLANNING and self.current_task.plan is not None
+        ):
+            if self.current_task.plan is None:
+                # Defensive: AWAITING_APPROVAL implies a plan exists.
+                raise ValueError(
+                    f"task {task_id!r} is awaiting approval but has no saved plan"
+                )
+            return self._run_approval_then_execution()
+
+        # Default: planning loop — picks up wherever the prior session
+        # stopped (the conversation transcript is the agent's memory).
+        return self._run_planning_then_execution()
+
+    # ------------------------------------------------------------------
+    # Phase composition — extracted from run() so resume() can pick up
+    # at any phase without duplicating logic.
+    # ------------------------------------------------------------------
+
+    def _run_planning_then_execution(self) -> Task:
+        """Phase 1 (planning) → Phase 2 (gated execution)."""
         console.print("\n[bold cyan]Phase 1: Planning[/bold cyan]")
         self._agent_loop(phase="planning")
+        return self._run_approval_then_execution()
 
-        # Present plan and ask for approval
-        if self.current_task.plan:
-            self._present_plan(self.current_task.plan)
-            approved = self._request_approval()
+    def _run_approval_then_execution(self) -> Task:
+        """Post-Phase-1: present plan, request approval, run Phase 2 if approved.
 
-            if not approved:
-                self._transition(TaskStatus.FAILED)
-                self._persist_terminal_result(success=False, summary="plan rejected")
-                console.print("[bold red]Plan rejected by user. Task cancelled.[/bold red]")
-                return self.current_task
+        If the agent didn't produce a structured plan, treat the run as
+        complete (it answered the question directly).
+        """
+        if self.current_task is None:
+            raise RuntimeError("AgentLoop._run_approval_then_execution called with no current_task")
 
-            self.plan_approved = True
-            if self.working_memory is not None and self.current_task is not None:
-                try:
-                    self.working_memory.set_plan_approved(
-                        self.current_task.task_id, approved=True,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to persist plan-approval flag for task %s",
-                        self.current_task.task_id,
-                    )
-            self._transition(TaskStatus.EXECUTING)
-
-            console.print("\n[bold cyan]Phase 2: Executing approved plan[/bold cyan]")
-            self.conversation.append({
-                "role": "user",
-                "content": "Plan approved. Proceed with execution.",
-            })
-            self._agent_loop(phase="execution")
-            self._transition(TaskStatus.COMPLETE)
-            self._persist_terminal_result(success=True, summary="completed")
-        else:
+        if not self.current_task.plan:
             console.print(
                 "[bold yellow]Agent did not produce a structured plan. "
                 "Task may have been answered directly.[/bold yellow]"
             )
             self._transition(TaskStatus.COMPLETE)
             self._persist_terminal_result(success=True, summary="answered without plan")
+            return self.current_task
 
+        # Persisted state: planning → awaiting_approval, so a crash here
+        # leaves a clear "redisplay plan and re-prompt" signal for resume.
+        self._transition(TaskStatus.AWAITING_APPROVAL)
+        self._present_plan(self.current_task.plan)
+        approved = self._request_approval()
+
+        if not approved:
+            self._transition(TaskStatus.FAILED)
+            self._persist_terminal_result(success=False, summary="plan rejected")
+            console.print("[bold red]Plan rejected by user. Task cancelled.[/bold red]")
+            return self.current_task
+
+        self.plan_approved = True
+        if self.working_memory is not None:
+            try:
+                self.working_memory.set_plan_approved(
+                    self.current_task.task_id, approved=True,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist plan-approval flag for task %s",
+                    self.current_task.task_id,
+                )
+
+        return self._run_execution_only(append_transition_message=True)
+
+    def _run_execution_only(self, *, append_transition_message: bool) -> Task:
+        """Phase 2. Assumes a plan is approved and the conversation has the
+        transition message already (resume from EXECUTING) or that we should
+        add it here (fresh approval flow).
+        """
+        if self.current_task is None:
+            raise RuntimeError("AgentLoop._run_execution_only called with no current_task")
+
+        self._transition(TaskStatus.EXECUTING)
+
+        if append_transition_message:
+            self.conversation.append({
+                "role": "user",
+                "content": "Plan approved. Proceed with execution.",
+            })
+
+        console.print("\n[bold cyan]Phase 2: Executing approved plan[/bold cyan]")
+        self._agent_loop(phase="execution")
+        self._transition(TaskStatus.COMPLETE)
+        self._persist_terminal_result(success=True, summary="completed")
         return self.current_task
 
     def _persist_terminal_result(self, success: bool, summary: str) -> None:
@@ -440,8 +582,13 @@ class AgentLoop:
                 "role": "user",
                 "content": f"Please revise the plan: {feedback}",
             })
+            # Persisted state goes back to planning while the agent revises;
+            # _present_plan + _request_approval below will flip it to
+            # awaiting_approval again.
+            self._transition(TaskStatus.PLANNING)
             self._agent_loop(phase="planning")
             if self.current_task and self.current_task.plan:
+                self._transition(TaskStatus.AWAITING_APPROVAL)
                 self._present_plan(self.current_task.plan)
                 return self._request_approval()
             return False

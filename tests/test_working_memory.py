@@ -528,3 +528,314 @@ def test_agent_run_persists_rejected_plan_as_failed(
     assert row.completed_at is not None  # terminal state stamped
 
     store.close()
+
+
+def test_agent_run_persists_awaiting_approval_state(
+    tmp_path: Path, org: OrgConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between submit_plan and the human prompt, the row reflects awaiting_approval."""
+    db = tmp_path / "awaiting.db"
+    store = WorkingMemoryStore(db)
+
+    captured_status_at_prompt: list[str] = []
+
+    def _capture_status_then_no(*args, **kwargs):
+        # When the prompt fires, status must already be AWAITING_APPROVAL.
+        # We capture from disk to verify what a resuming process would see.
+        all_tasks = store.list_tasks(MemoryScope(tenant_id="t1", org_alias="OrgA"))
+        if all_tasks:
+            captured_status_at_prompt.append(all_tasks[0].status)
+        return "no"
+
+    from sf_dev_agent import agent as agent_mod
+    monkeypatch.setattr(agent_mod.Prompt, "ask", _capture_status_then_no)
+
+    plan_input = {
+        "summary": "no-op", "steps": [], "preflight_checks": [],
+        "risk_assessment": "low", "risk_reasoning": "trivial",
+        "rollback_strategy": "none",
+    }
+    provider = _FakeProvider([
+        LLMResponse(
+            text_blocks=["Plan."],
+            tool_calls=[ToolCall(id="tu", name="submit_plan", input=plan_input)],
+            stop_reason="tool_use",
+        ),
+        LLMResponse(text_blocks=["Submitted."], stop_reason="end_turn"),
+    ])
+    agent = AgentLoop(
+        org=org, provider=provider, mock_org=True, working_memory=store,
+    )
+    agent.run("trivial")
+
+    assert captured_status_at_prompt == [TaskStatus.AWAITING_APPROVAL.value]
+
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# Resume — picks up a persisted task from any non-terminal status
+# ---------------------------------------------------------------------------
+
+def _seed_awaiting_approval_task(
+    store: WorkingMemoryStore,
+    task_id: str,
+    org: OrgConnection,
+    plan_input: dict[str, Any],
+) -> None:
+    """Pretend a prior process got as far as awaiting_approval, then died."""
+    scope = MemoryScope(tenant_id=org.tenant_id, org_alias=org.org_alias)
+    store.create_task(task_id, scope, "fix the thing")
+    store.append_message(task_id, "user", "fix the thing")
+    store.append_message(task_id, "assistant", [
+        {"type": "text", "text": "Here's my plan."},
+        {"type": "tool_use", "id": "tu_seed", "name": "submit_plan", "input": plan_input},
+    ])
+    store.append_message(task_id, "user", [
+        {"type": "tool_result", "tool_use_id": "tu_seed",
+         "content": '{"status": "plan_registered"}'},
+    ])
+    store.set_plan(task_id, json.dumps(plan_input))
+    store.update_task_status(task_id, TaskStatus.AWAITING_APPROVAL.value)
+
+
+def test_resume_from_awaiting_approval_yes_runs_phase2(
+    tmp_path: Path, org: OrgConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume re-displays the plan, gets approval, then runs Phase 2 to completion."""
+    db = tmp_path / "resume_yes.db"
+    store = WorkingMemoryStore(db)
+
+    plan_input = {
+        "summary": "resume-target plan",
+        "steps": [{
+            "step_number": 1, "action": "describe", "target": "Account",
+            "mode": "read", "risk": "low", "description": "no-op",
+        }],
+        "preflight_checks": [],
+        "risk_assessment": "low", "risk_reasoning": "read-only",
+        "rollback_strategy": "none",
+    }
+    _seed_awaiting_approval_task(store, "task_resume_yes", org, plan_input)
+
+    from sf_dev_agent import agent as agent_mod
+    monkeypatch.setattr(agent_mod.Prompt, "ask", lambda *a, **k: "yes")
+
+    # Phase 2 is a no-tool-call assistant turn that ends.
+    provider = _FakeProvider([
+        LLMResponse(text_blocks=["Done with execution."], stop_reason="end_turn"),
+    ])
+
+    task = AgentLoop.resume(
+        task_id="task_resume_yes",
+        org=org, provider=provider,
+        working_memory=store, mock_org=True,
+    )
+
+    row = store.get_task("task_resume_yes")
+    assert row is not None
+    assert row.status == TaskStatus.COMPLETE.value
+    assert row.plan_approved is True
+    assert json.loads(row.result_json)["success"] is True
+
+    # Conversation grew: original 3 messages + post-approval transition + assistant turn.
+    msgs = store.load_messages("task_resume_yes")
+    assert len(msgs) >= 5
+    contents = [m["content"] for m in msgs]
+    assert any(
+        isinstance(c, str) and "Plan approved" in c for c in contents
+    ), "Expected the post-approval transition message in the transcript"
+
+    assert task.status == TaskStatus.COMPLETE
+    store.close()
+
+
+def test_resume_from_awaiting_approval_no_marks_failed(
+    tmp_path: Path, org: OrgConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "resume_no.db"
+    store = WorkingMemoryStore(db)
+
+    plan_input = {
+        "summary": "scary", "steps": [], "preflight_checks": [],
+        "risk_assessment": "high", "risk_reasoning": "x", "rollback_strategy": "y",
+    }
+    _seed_awaiting_approval_task(store, "task_resume_no", org, plan_input)
+
+    from sf_dev_agent import agent as agent_mod
+    monkeypatch.setattr(agent_mod.Prompt, "ask", lambda *a, **k: "no")
+
+    provider = _FakeProvider([])  # No LLM calls expected — rejection short-circuits.
+
+    task = AgentLoop.resume(
+        task_id="task_resume_no",
+        org=org, provider=provider,
+        working_memory=store, mock_org=True,
+    )
+
+    row = store.get_task("task_resume_no")
+    assert row is not None
+    assert row.status == TaskStatus.FAILED.value
+    assert row.plan_approved is False
+    assert row.completed_at is not None
+    assert task.status == TaskStatus.FAILED
+    # Provider should not have been called.
+    assert provider.calls == []
+
+    store.close()
+
+
+def test_resume_from_executing_skips_phase1(
+    tmp_path: Path, org: OrgConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A task that crashed mid-Phase-2 resumes straight into execution."""
+    db = tmp_path / "resume_exec.db"
+    store = WorkingMemoryStore(db)
+
+    scope = MemoryScope(tenant_id=org.tenant_id, org_alias=org.org_alias)
+    plan_input = {
+        "summary": "in-flight",
+        "steps": [], "preflight_checks": [],
+        "risk_assessment": "low", "risk_reasoning": "x",
+        "rollback_strategy": "none",
+    }
+    store.create_task("task_exec", scope, "do the thing")
+    store.append_message("task_exec", "user", "do the thing")
+    store.append_message("task_exec", "user", "Plan approved. Proceed with execution.")
+    store.set_plan("task_exec", json.dumps(plan_input))
+    store.set_plan_approved("task_exec", True)
+    store.update_task_status("task_exec", TaskStatus.EXECUTING.value)
+
+    # The approval prompt must NOT be invoked on resume from executing.
+    from sf_dev_agent import agent as agent_mod
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("approval prompt should not fire on resume from EXECUTING")
+    monkeypatch.setattr(agent_mod.Prompt, "ask", _should_not_be_called)
+
+    provider = _FakeProvider([
+        LLMResponse(text_blocks=["Wrapping up the execution."], stop_reason="end_turn"),
+    ])
+
+    task = AgentLoop.resume(
+        task_id="task_exec", org=org, provider=provider,
+        working_memory=store, mock_org=True,
+    )
+
+    row = store.get_task("task_exec")
+    assert row is not None
+    assert row.status == TaskStatus.COMPLETE.value
+    assert task.status == TaskStatus.COMPLETE
+
+    # No duplicate "Plan approved..." message — it was already in the seed.
+    msgs = store.load_messages("task_exec")
+    approved_count = sum(
+        1 for m in msgs
+        if isinstance(m["content"], str) and "Plan approved" in m["content"]
+    )
+    assert approved_count == 1, "Resume from EXECUTING must NOT re-append the transition message"
+
+    store.close()
+
+
+def test_resume_from_terminal_short_circuits(
+    tmp_path: Path, org: OrgConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Already-complete tasks return immediately with no provider call."""
+    db = tmp_path / "resume_term.db"
+    store = WorkingMemoryStore(db)
+
+    scope = MemoryScope(tenant_id=org.tenant_id, org_alias=org.org_alias)
+    store.create_task("task_done", scope, "x")
+    store.set_result(
+        "task_done", json.dumps({"success": True}),
+        status=TaskStatus.COMPLETE.value,
+    )
+
+    # Anything that triggers a real LLM/prompt call would error.
+    from sf_dev_agent import agent as agent_mod
+    monkeypatch.setattr(
+        agent_mod.Prompt, "ask",
+        lambda *a, **k: pytest.fail("resume(terminal) must not prompt"),
+    )
+    provider = _FakeProvider([])
+
+    task = AgentLoop.resume(
+        task_id="task_done", org=org, provider=provider,
+        working_memory=store, mock_org=True,
+    )
+    assert task.status == TaskStatus.COMPLETE
+    assert provider.calls == []
+
+    store.close()
+
+
+def test_resume_unknown_task_raises(
+    tmp_path: Path, org: OrgConnection
+) -> None:
+    db = tmp_path / "resume_404.db"
+    store = WorkingMemoryStore(db)
+    provider = _FakeProvider([])
+    with pytest.raises(ValueError, match="not found"):
+        AgentLoop.resume(
+            task_id="never_existed", org=org, provider=provider,
+            working_memory=store, mock_org=True,
+        )
+    store.close()
+
+
+def test_resume_wrong_tenant_raises(
+    tmp_path: Path, org: OrgConnection
+) -> None:
+    """Cross-tenant resume must not silently leak data into the wrong org."""
+    db = tmp_path / "resume_tenant.db"
+    store = WorkingMemoryStore(db)
+    foreign_scope = MemoryScope(tenant_id="other_tenant", org_alias="OrgZ")
+    store.create_task("task_other", foreign_scope, "x")
+
+    provider = _FakeProvider([])
+    with pytest.raises(ValueError, match="tenant"):
+        AgentLoop.resume(
+            task_id="task_other", org=org, provider=provider,
+            working_memory=store, mock_org=True,
+        )
+    store.close()
+
+
+def test_resume_seeds_conversation_with_persisted_messages(
+    tmp_path: Path, org: OrgConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provider receives the persisted messages on resume — agent has the prior context."""
+    db = tmp_path / "resume_seed.db"
+    store = WorkingMemoryStore(db)
+
+    plan_input = {
+        "summary": "resume", "steps": [], "preflight_checks": [],
+        "risk_assessment": "low", "risk_reasoning": "x", "rollback_strategy": "y",
+    }
+    _seed_awaiting_approval_task(store, "task_seed_check", org, plan_input)
+
+    from sf_dev_agent import agent as agent_mod
+    monkeypatch.setattr(agent_mod.Prompt, "ask", lambda *a, **k: "yes")
+
+    provider = _FakeProvider([
+        LLMResponse(text_blocks=["ok"], stop_reason="end_turn"),
+    ])
+    AgentLoop.resume(
+        task_id="task_seed_check", org=org, provider=provider,
+        working_memory=store, mock_org=True,
+    )
+
+    # The first chat() call in Phase 2 must include the seeded messages
+    # (user request, prior assistant turn, prior tool_result) PLUS the
+    # post-approval transition message.
+    assert provider.calls, "Expected the resumed agent to call the LLM"
+    first_messages = provider.calls[0]
+    user_contents = [
+        m["content"] for m in first_messages if m["role"] == "user"
+    ]
+    assert "fix the thing" in [c for c in user_contents if isinstance(c, str)]
+    assert any(
+        isinstance(c, str) and "Plan approved" in c for c in user_contents
+    )
+
+    store.close()
