@@ -573,6 +573,259 @@ def test_decay_cosine_dominates_over_decay_signal(
     )
 
 
+# ---------------------------------------------------------------------------
+# Compaction — find_merge_candidates + memory_compact + memory_supersede
+# ---------------------------------------------------------------------------
+
+def test_find_merge_candidates_empty_store_returns_nothing(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    assert store.find_merge_candidates(scope=scope) == []
+
+
+def test_find_merge_candidates_singleton_does_not_cluster(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    embedder = MockEmbedder(dim=64)
+    store.save(scope=scope, type="feedback", name="lonely",
+               description="x", body="lonely content")
+    store.embed_pending(embedder)
+    assert store.find_merge_candidates(scope=scope) == []
+
+
+def test_find_merge_candidates_unrelated_pair_does_not_cluster(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """Two memories with disjoint vocabularies must not cluster at 0.85."""
+    embedder = MockEmbedder(dim=64)
+    store.save(scope=scope, type="feedback", name="dup",
+               description="x", body="duplicate account email phone match")
+    store.save(scope=scope, type="feedback", name="tax",
+               description="x", body="invoice tax regional calculation rules")
+    store.embed_pending(embedder)
+    assert store.find_merge_candidates(scope=scope, threshold=0.85) == []
+
+
+def test_find_merge_candidates_identical_bodies_cluster(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """Near-identical embedding text (only name differs) clusters at the design default."""
+    embedder = MockEmbedder(dim=64)
+    a = store.save(scope=scope, type="feedback", name="a",
+                   description="dup detection rule",
+                   body="duplicate account email phone match")
+    b = store.save(scope=scope, type="feedback", name="b",
+                   description="dup detection rule",
+                   body="duplicate account email phone match")
+    store.embed_pending(embedder)
+
+    candidates = store.find_merge_candidates(scope=scope, threshold=0.85)
+    assert len(candidates) == 1
+    cluster = candidates[0]
+    assert cluster.type == "feedback"
+    assert {m.id for m in cluster.members} == {a.id, b.id}
+    # Bag-of-words on tokens that differ only by `name` -> cosine ≈ 0.93.
+    assert cluster.average_similarity >= 0.85
+
+
+def test_find_merge_candidates_three_identical_form_one_cluster(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """Transitive grouping: three near-identical memories collapse to one cluster."""
+    embedder = MockEmbedder(dim=64)
+    ids = []
+    for letter in "abc":
+        rec = store.save(
+            scope=scope, type="feedback", name=f"v{letter}",
+            description="rule", body="duplicate account email phone match",
+        )
+        ids.append(rec.id)
+    store.embed_pending(embedder)
+
+    candidates = store.find_merge_candidates(scope=scope, threshold=0.9)
+    assert len(candidates) == 1
+    assert {m.id for m in candidates[0].members} == set(ids)
+
+
+def test_find_merge_candidates_isolates_types(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """Same content under different types must not cluster across types."""
+    embedder = MockEmbedder(dim=64)
+    store.save(scope=scope, type="feedback", name="a",
+               description="x", body="duplicate account email phone match")
+    store.save(scope=scope, type="project", name="b",
+               description="x", body="duplicate account email phone match")
+    store.embed_pending(embedder)
+
+    # Each type has only one row -> no clusters possible.
+    assert store.find_merge_candidates(scope=scope, threshold=0.5) == []
+
+
+def test_find_merge_candidates_excludes_superseded(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """A row that's already been merged away must not appear in new clusters."""
+    embedder = MockEmbedder(dim=64)
+    a = store.save(scope=scope, type="feedback", name="a",
+                   description="x", body="same body content here")
+    b = store.save(scope=scope, type="feedback", name="b",
+                   description="x", body="same body content here")
+    c = store.save(scope=scope, type="feedback", name="c",
+                   description="x", body="same body content here")
+    store.embed_pending(embedder)
+
+    # Pretend `a` was already merged into `c` previously.
+    store.supersede(a.id, c.id)
+
+    candidates = store.find_merge_candidates(scope=scope, threshold=0.85)
+    # The remaining cluster should contain b and c only — `a` is tombstoned.
+    assert len(candidates) == 1
+    member_ids = {m.id for m in candidates[0].members}
+    assert member_ids == {b.id, c.id}
+
+
+def test_find_merge_candidates_threshold_tunable(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """A high threshold may produce no clusters where a low one finds one."""
+    embedder = MockEmbedder(dim=64)
+    # Bodies share one token ('account') and differ otherwise.
+    store.save(scope=scope, type="feedback", name="a",
+               description="x", body="account dedup logic")
+    store.save(scope=scope, type="feedback", name="b",
+               description="x", body="account tax computation rules")
+    store.embed_pending(embedder)
+
+    high = store.find_merge_candidates(scope=scope, threshold=0.99)
+    assert high == []
+    # At threshold 0, every embedded pair connects, so a cluster is found.
+    low = store.find_merge_candidates(scope=scope, threshold=0.0)
+    assert len(low) == 1
+    assert len(low[0].members) == 2
+
+
+def test_find_merge_candidates_rejects_bad_threshold(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    with pytest.raises(ValueError):
+        store.find_merge_candidates(scope=scope, threshold=1.5)
+    with pytest.raises(ValueError):
+        store.find_merge_candidates(scope=scope, threshold=-0.1)
+
+
+def test_supersede_hides_old_from_recall(
+    store: MemoryStore, scope: MemoryScope
+) -> None:
+    """After supersede, recall returns only the surviving memory."""
+    embedder = MockEmbedder(dim=64)
+    old = store.save(scope=scope, type="feedback", name="old-rule",
+                     description="x", body="dedup rule version 1")
+    new = store.save(scope=scope, type="feedback", name="new-rule",
+                     description="x", body="dedup rule consolidated")
+    store.embed_pending(embedder)
+
+    store.supersede(old.id, new.id)
+
+    query_vec = embedder.embed_one("dedup rule")
+    hits = store.recall(query_vec, scope=scope, limit=10)
+    ids = {h.record.id for h in hits}
+    assert old.id not in ids
+    assert new.id in ids
+
+
+def test_memory_compact_via_registry(
+    tmp_path: Path, org: OrgConnection
+) -> None:
+    db = tmp_path / "compact.db"
+    embedder = MockEmbedder(dim=64)
+    with MemoryStore(db) as store:
+        scope = MemoryScope(tenant_id=org.tenant_id, org_alias=org.org_alias)
+        store.save(scope=scope, type="feedback", name="a",
+                   description="x", body="duplicate account email match")
+        store.save(scope=scope, type="feedback", name="b",
+                   description="x", body="duplicate account email match")
+        store.embed_pending(embedder)
+
+    registry = ToolRegistry(org=org, mock_org=False, index_db_path=db)
+    resp = registry.execute("memory_compact", {"threshold": 0.85})
+    assert resp["cluster_count"] == 1
+    cluster = resp["clusters"][0]
+    assert cluster["type"] == "feedback"
+    assert cluster["size"] == 2
+    assert {m["name"] for m in cluster["members"]} == {"a", "b"}
+
+
+def test_memory_supersede_round_trip_via_registry(
+    tmp_path: Path, org: OrgConnection
+) -> None:
+    db = tmp_path / "super.db"
+    registry = ToolRegistry(org=org, mock_org=False, index_db_path=db)
+
+    save_old = registry.execute("memory_save", {
+        "type": "feedback", "name": "old-pref",
+        "description": "x", "body": "old guidance",
+    })
+    save_new = registry.execute("memory_save", {
+        "type": "feedback", "name": "new-pref",
+        "description": "x", "body": "new guidance",
+    })
+    resp = registry.execute("memory_supersede", {
+        "old_id": save_old["id"], "new_id": save_new["id"],
+    })
+    assert resp["superseded"] is True
+    assert resp["old_id"] == save_old["id"]
+    assert resp["new_id"] == save_new["id"]
+
+    # The old memory disappears from list by default but reappears with
+    # include_superseded=true.
+    listing = registry.execute("memory_list", {})
+    visible = {m["name"] for m in listing["memories"]}
+    assert "new-pref" in visible
+    assert "old-pref" not in visible
+
+    listing_all = registry.execute("memory_list", {"include_superseded": True})
+    all_names = {m["name"] for m in listing_all["memories"]}
+    assert "old-pref" in all_names
+
+
+def test_memory_supersede_rejects_self_and_missing_ids(
+    tmp_path: Path, org: OrgConnection
+) -> None:
+    db = tmp_path / "super_err.db"
+    registry = ToolRegistry(org=org, mock_org=False, index_db_path=db)
+    save_a = registry.execute("memory_save", {
+        "type": "user", "name": "a", "description": "x", "body": "x",
+    })
+    save_b = registry.execute("memory_save", {
+        "type": "user", "name": "b", "description": "x", "body": "x",
+    })
+
+    same = registry.execute("memory_supersede", {
+        "old_id": save_a["id"], "new_id": save_a["id"],
+    })
+    assert "error" in same and "differ" in same["error"]
+
+    missing_old = registry.execute("memory_supersede", {
+        "old_id": "nope", "new_id": save_a["id"],
+    })
+    assert "not found" in missing_old["error"]
+
+    missing_new = registry.execute("memory_supersede", {
+        "old_id": save_a["id"], "new_id": "nope",
+    })
+    assert "not found" in missing_new["error"]
+
+    # Chain refusal: supersede a, then try to supersede a again.
+    registry.execute("memory_supersede", {
+        "old_id": save_a["id"], "new_id": save_b["id"],
+    })
+    chain = registry.execute("memory_supersede", {
+        "old_id": save_a["id"], "new_id": save_b["id"],
+    })
+    assert "already superseded" in chain["error"]
+
+
 def test_decay_via_orchestrator_layer(
     tmp_path: Path, scope: MemoryScope
 ) -> None:

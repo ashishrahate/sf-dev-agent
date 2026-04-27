@@ -53,6 +53,7 @@ from sf_dev_agent.memory.store import (
     MemoryRecord,
     MemoryScope,
     MemoryStore,
+    MergeCandidate,
     make_memory_id,
 )
 from sf_dev_agent.memory.working import (
@@ -70,6 +71,7 @@ __all__ = [
     "MemoryRecord",
     "MemoryScope",
     "MemoryStore",
+    "MergeCandidate",
     "TaskRow",
     "WorkingMemoryStore",
     "make_memory_id",

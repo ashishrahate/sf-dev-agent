@@ -726,6 +726,96 @@ class ToolRegistry:
             executor=self._exec_memory_list,
         )
 
+        # --- memory_compact (find merge candidates) ----------------------
+        self.register(
+            ToolDefinition(
+                name="memory_compact",
+                description=(
+                    "Detect clusters of similar memories that could be "
+                    "consolidated. Pairwise cosine within (scope, type); "
+                    "rows whose similarity is at or above `threshold` are "
+                    "grouped via connected components. Returns clusters of "
+                    "size 2+ ordered by tightness.\n\n"
+                    "Use this when memory_list shows the working set "
+                    "growing past ~30-50 entries, or after a session that "
+                    "produced several near-duplicate feedback memories.\n\n"
+                    "Read-only — no Gemini call (operates on stored "
+                    "embeddings). To act on a cluster: write a single "
+                    "consolidated memory with memory_save, then call "
+                    "memory_supersede for each old member pointing at the "
+                    "new memory's id."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["user", "feedback", "project", "reference"],
+                            "description": (
+                                "Restrict clustering to one memory type. "
+                                "Omit to scan all four types (clusters are "
+                                "always type-homogeneous regardless)."
+                            ),
+                        },
+                        "threshold": {
+                            "type": "number",
+                            "description": (
+                                "Cosine cutoff for 'these are the same "
+                                "idea' (0..1). Default 0.85 — high enough "
+                                "that genuinely different memories don't "
+                                "cluster, low enough that paraphrases do."
+                            ),
+                            "default": 0.85,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max clusters returned (default 10, max 25).",
+                            "default": 10,
+                        },
+                    },
+                },
+                read_only=True,
+            ),
+            executor=self._exec_memory_compact,
+        )
+
+        # --- memory_supersede (link old memory -> newer merged memory) ---
+        self.register(
+            ToolDefinition(
+                name="memory_supersede",
+                description=(
+                    "Mark `old_id` as superseded by `new_id`. The old row "
+                    "stays in the database (audit trail) but disappears "
+                    "from recall and list (use include_superseded=true to "
+                    "see them again). Pair with memory_save to ship a "
+                    "consolidated memory, then supersede each old member.\n\n"
+                    "Both ids must already exist. Cross-scope supersede is "
+                    "allowed but typically a mistake — usually you want "
+                    "old and new in the same (tenant, org_alias)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "old_id": {
+                            "type": "string",
+                            "description": "ID of the memory being replaced.",
+                        },
+                        "new_id": {
+                            "type": "string",
+                            "description": (
+                                "ID of the memory replacing it. Must "
+                                "exist (write the merged memory first "
+                                "with memory_save)."
+                            ),
+                        },
+                    },
+                    "required": ["old_id", "new_id"],
+                },
+                read_only=False,
+            ),
+            executor=self._exec_memory_supersede,
+        )
+
         # --- embed_knowledge_base (auto-loads + embeds bundled entries) ---
         self.register(
             ToolDefinition(
@@ -1610,6 +1700,102 @@ class ToolRegistry:
                 }
                 for r in records
             ],
+        }
+
+    def _exec_memory_compact(
+        self,
+        type: str | None = None,
+        threshold: float = 0.85,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Surface clusters of similar memories for the agent to merge."""
+        from sf_dev_agent.memory import MemoryStore
+
+        limit = max(1, min(limit, 25))
+        db_path = self._resolve_index_db_path()
+        scope = self._memory_scope()
+
+        try:
+            with MemoryStore(db_path) as store:
+                clusters = store.find_merge_candidates(
+                    scope=scope,
+                    type=type,
+                    threshold=threshold,
+                    max_clusters=limit,
+                )
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+        return {
+            "tenant_id": scope.tenant_id,
+            "org_alias": scope.org_alias,
+            "threshold": threshold,
+            "cluster_count": len(clusters),
+            "clusters": [
+                {
+                    "type": c.type,
+                    "average_similarity": round(c.average_similarity, 4),
+                    "size": len(c.members),
+                    "members": [
+                        {
+                            "id": m.id,
+                            "name": m.name,
+                            "description": m.description,
+                            "body": m.body,
+                            "tags": m.tags,
+                            "created_at": m.created_at,
+                            "last_accessed_at": m.last_accessed_at,
+                            "access_count": m.access_count,
+                        }
+                        for m in c.members
+                    ],
+                }
+                for c in clusters
+            ],
+            "note": (
+                "To act on a cluster: write a single consolidated memory "
+                "with memory_save, then call memory_supersede(old_id, "
+                "new_id) for each member you're folding in."
+            ),
+        }
+
+    def _exec_memory_supersede(
+        self,
+        old_id: str,
+        new_id: str,
+    ) -> dict[str, Any]:
+        """Link old_id -> new_id; old becomes invisible to recall + list."""
+        from sf_dev_agent.memory import MemoryStore
+
+        if old_id == new_id:
+            return {"error": "old_id and new_id must differ"}
+
+        db_path = self._resolve_index_db_path()
+        with MemoryStore(db_path) as store:
+            old = store.find_by_id(old_id)
+            new = store.find_by_id(new_id)
+            if old is None:
+                return {"error": f"old memory {old_id!r} not found"}
+            if new is None:
+                return {"error": f"new memory {new_id!r} not found"}
+            if old.superseded_by is not None:
+                return {
+                    "error": (
+                        f"memory {old_id!r} is already superseded by "
+                        f"{old.superseded_by!r}; refusing to chain"
+                    ),
+                }
+            store.supersede(old_id=old_id, new_id=new_id)
+
+        return {
+            "superseded": True,
+            "old_id": old_id,
+            "new_id": new_id,
+            "note": (
+                "The old memory is preserved on disk for auditability "
+                "(use memory_list with include_superseded=true to see it). "
+                "It will no longer surface in recall."
+            ),
         }
 
     def _exec_retrieve_context(

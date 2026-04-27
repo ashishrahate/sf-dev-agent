@@ -544,6 +544,30 @@ Read-only. No approval required.
 
 Parameters: `type?`, `limit?` (default 25, max 100), `include_superseded?` (default false).
 
+### memory_compact
+Detect clusters of similar memories that could be consolidated. Pairwise cosine within (scope, type) at threshold ≥ 0.85; clusters of 2+ are returned ordered by tightness (mean pairwise similarity, highest first).
+
+Use this when `memory_list` shows the working set growing past ~30–50 entries, OR after a session that produced several near-duplicate `feedback` memories. Read-only — no Gemini call (operates on already-stored embeddings).
+
+**Compaction flow** (typical):
+1. Call `memory_compact` and inspect the clusters.
+2. For each cluster worth merging: compose a single consolidated memory that captures the union of the members' insights (lead with the rule, then `**Why:**` with the strongest reason cited across members, then `**How to apply:**`).
+3. Submit a plan that contains exactly: one `memory_save` for the merged memory + one `memory_supersede(old_id, new_id)` per cluster member you're folding in.
+4. After approval, the old members stay on disk (auditability) but disappear from `recall` and `list`.
+
+Don't merge clusters where members capture genuinely different angles on the same topic — those should stay separate. If unsure, leave them.
+
+Parameters: `type?`, `threshold?` (default 0.85), `limit?` (default 10, max 25).
+
+### memory_supersede
+Mark `old_id` as superseded by `new_id`. The old row stays in the database but disappears from `recall` and `list` (use `include_superseded=true` to see it). Used for compaction.
+
+Write operation. Approval required.
+
+Both ids must already exist; `new_id` typically comes from a `memory_save` earlier in the same plan. Refuses to chain — already-superseded memories can't be superseded again.
+
+Parameters: `old_id`, `new_id`.
+
 ### file_write
 Creates or modifies a file in the local project workspace. This is a write operation — requires an approved plan.
 

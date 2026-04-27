@@ -122,6 +122,19 @@ class MemoryRecallHit:
 
 
 @dataclass
+class MergeCandidate:
+    """A cluster of memories whose pairwise cosine ≥ threshold, ready to merge.
+
+    Always contains 2+ members of the same `type` (cross-type merges aren't
+    proposed — a `feedback` and a `project` row about the same topic mean
+    different things to the agent and shouldn't be collapsed).
+    """
+    type: str
+    members: list[MemoryRecord]
+    average_similarity: float
+
+
+@dataclass
 class MemoryEmbedResult:
     embedded: int = 0
     skipped_unchanged: int = 0
@@ -467,6 +480,99 @@ class MemoryStore:
             self._conn.commit()
 
         return hits
+
+    def find_merge_candidates(
+        self,
+        scope: MemoryScope,
+        type: str | None = None,
+        threshold: float = 0.85,
+        max_clusters: int = 20,
+    ) -> list[MergeCandidate]:
+        """Detect clusters of similar memories that the agent could merge.
+
+        Algorithm: for each `type` in scope, build the pairwise cosine
+        matrix of embedded rows, treat the threshold-graph as undirected,
+        and emit each connected component of size ≥ 2 as a MergeCandidate.
+
+        Already-superseded rows are excluded — they're tombstones, not
+        active members of the working set. Cross-type clusters are NOT
+        produced; clustering runs per-type and concatenates results.
+
+        Args:
+            scope: tenant + org filter (same semantics as `recall`).
+            type: restrict to one memory type; None scans all four types.
+            threshold: cosine cutoff for "these are the same idea". 0.85
+                is the design's default — high enough that genuinely
+                different memories don't get merged, low enough that
+                paraphrases cluster.
+            max_clusters: cap on returned clusters across all types.
+
+        Returns:
+            Up to `max_clusters` MergeCandidate rows, ordered by
+            descending average similarity (tightest clusters first).
+        """
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("threshold must be in [0, 1]")
+
+        types_to_scan = [type] if type is not None else sorted(MEMORY_TYPES)
+        candidates: list[MergeCandidate] = []
+
+        for t in types_to_scan:
+            sql, params = _scope_clause(scope, type=t, include_superseded=False)
+            rows = self._conn.execute(
+                f"SELECT * FROM memories "
+                f"WHERE {sql} AND embedding IS NOT NULL",
+                params,
+            ).fetchall()
+            if len(rows) < 2:
+                continue
+
+            matrix = np.vstack([
+                np.frombuffer(r["embedding"], dtype=np.float32) for r in rows
+            ])
+            norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            matrix = matrix / norms
+
+            sim = matrix @ matrix.T  # n x n cosine matrix; diagonal ≈ 1.0
+            n = len(rows)
+            visited = [False] * n
+
+            for i in range(n):
+                if visited[i]:
+                    continue
+                # BFS to gather a connected component over edges ≥ threshold.
+                component = [i]
+                visited[i] = True
+                queue = [i]
+                while queue:
+                    j = queue.pop()
+                    # Mask out self-edge so we don't loop back.
+                    for k in range(n):
+                        if k == j or visited[k]:
+                            continue
+                        if sim[j, k] >= threshold:
+                            visited[k] = True
+                            component.append(k)
+                            queue.append(k)
+                if len(component) < 2:
+                    continue
+
+                # Average pairwise similarity within the component (excludes
+                # the self-similarity diagonal).
+                pairs = [
+                    sim[a, b] for a in component for b in component if a < b
+                ]
+                avg = float(np.mean(pairs)) if pairs else 1.0
+
+                candidates.append(MergeCandidate(
+                    type=t,
+                    members=[_row_to_record(rows[idx]) for idx in component],
+                    average_similarity=avg,
+                ))
+
+        candidates.sort(key=lambda c: c.average_similarity, reverse=True)
+        return candidates[:max_clusters]
 
     def stats(self, scope: MemoryScope | None = None) -> dict[str, int]:
         """Per-type counts. With `scope`, restrict to that tenant+org."""
