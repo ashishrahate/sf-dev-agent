@@ -109,3 +109,43 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_scope     ON memories(tenant_id, org_alias);
 CREATE INDEX IF NOT EXISTS idx_memories_type      ON memories(type);
 CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);
+
+-- Working memory (Wave 8 slice 2a) — task state + conversation transcripts.
+-- Persists every Task and every message in its conversation so the agent can
+-- resume from crash, review past sessions, and feed past conversations to
+-- the LLM-driven extraction pipeline (slice 2c).
+--
+-- Each Task row mirrors `models.schemas.Task` plus an org_alias scope and
+-- the JSON-serialized plan / result. `conversation_messages` stores each
+-- message as (task_id, seq) with the content_json blob — content can be a
+-- string or a list of typed blocks (text / tool_use / tool_result).
+CREATE TABLE IF NOT EXISTS tasks (
+    id              TEXT PRIMARY KEY,           -- the Task.task_id
+    tenant_id       TEXT NOT NULL,
+    org_alias       TEXT,                       -- nullable: pre-org-binding tasks
+    status          TEXT NOT NULL,              -- TaskStatus enum value
+    user_request    TEXT NOT NULL,              -- the original ask
+    plan_json       TEXT,                       -- serialized ExecutionPlan, set when registered
+    plan_approved   INTEGER NOT NULL DEFAULT 0, -- 0 or 1
+    result_json     TEXT,                       -- serialized TaskResult, set on completion
+    error           TEXT,                       -- failure detail
+    created_at      TEXT NOT NULL,              -- ISO-8601 UTC
+    updated_at      TEXT NOT NULL,              -- bumped on every mutation
+    completed_at    TEXT                        -- set when status reaches a terminal state
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_scope  ON tasks(tenant_id, org_alias);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL,
+    seq             INTEGER NOT NULL,           -- 0-indexed; replay order
+    role            TEXT NOT NULL,              -- "user" | "assistant"
+    content_json    TEXT NOT NULL,              -- JSON-serialized message content
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    UNIQUE (task_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_msgs_task_seq ON conversation_messages(task_id, seq);

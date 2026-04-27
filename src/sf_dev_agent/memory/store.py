@@ -37,10 +37,19 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from sf_dev_agent.context.embedders.base import Embedder, hash_text
+# Importing `Embedder` / `hash_text` from `sf_dev_agent.context.embedders.base`
+# at module load triggers `context/__init__.py`, which loads the orchestrator,
+# which itself imports MemoryScope/MemoryStore from this package. That round-
+# trip works when `context` is loaded before `memory`, but fails when an
+# entry point (e.g. agent.py) loads `memory` first. Pushing the runtime use
+# inside `embed_pending` and gating the type-only `Embedder` reference behind
+# TYPE_CHECKING keeps memory standalone.
+if TYPE_CHECKING:
+    from sf_dev_agent.context.embedders.base import Embedder
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +291,9 @@ class MemoryStore:
         batch_size: int = 32,
     ) -> MemoryEmbedResult:
         """Hash-gated embed/refresh — same pattern as KnowledgeBase.embed_entries."""
+        # Lazy import: see TYPE_CHECKING block at module top for the cycle.
+        from sf_dev_agent.context.embedders.base import hash_text
+
         result = MemoryEmbedResult(embedder_name=embedder.name)
 
         rows = self._conn.execute("SELECT * FROM memories").fetchall()

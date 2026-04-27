@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from rich.console import Console
@@ -12,12 +12,16 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+from sf_dev_agent.memory import (
+    ConversationLog,
+    MemoryScope,
+    WorkingMemoryStore,
+)
 from sf_dev_agent.models.schemas import (
     ExecutionPlan,
-    MessageRole,
     OrgConnection,
-    PreflightCheck,
     PlanStep,
+    PreflightCheck,
     RiskLevel,
     Task,
     TaskStatus,
@@ -65,12 +69,17 @@ class AgentLoop:
         provider: LLMProvider,
         max_iterations: int = 50,
         mock_org: bool = False,
+        working_memory: WorkingMemoryStore | None = None,
     ) -> None:
         self.org = org
         self.provider = provider
         self.max_iterations = max_iterations
         self.tool_registry = ToolRegistry(org=org, mock_org=mock_org)
-        self.conversation: list[dict[str, Any]] = []
+        self.working_memory = working_memory
+        # Initialized for real in run() once the task_id is known. Until
+        # then we use a placeholder ConversationLog with no store so the
+        # type stays consistent and providers can still iterate it.
+        self.conversation: ConversationLog = ConversationLog(task_id="")
         self.current_task: Task | None = None
         self.plan_approved = False
 
@@ -81,7 +90,7 @@ class AgentLoop:
             INSTANCE_URL=org.instance_url,
             API_VERSION=org.api_version,
             AGENT_MODEL=provider.model_name,
-            TIMESTAMP=datetime.now(timezone.utc).isoformat(),
+            TIMESTAMP=datetime.now(UTC).isoformat(),
         )
 
     # ------------------------------------------------------------------
@@ -90,11 +99,37 @@ class AgentLoop:
 
     def run(self, user_request: str) -> Task:
         """Execute a full task: plan → approve → execute."""
+        task_id = f"task_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
         self.current_task = Task(
-            task_id=f"task_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            task_id=task_id,
             tenant_id=self.org.tenant_id,
             user_request=user_request,
         )
+
+        # Persist the task row up-front and bind the conversation log to
+        # this task_id. Persistence failures are best-effort — log and
+        # continue on a plain in-memory log so the agent can still run
+        # without working memory.
+        scope = MemoryScope(tenant_id=self.org.tenant_id, org_alias=self.org.org_alias)
+        if self.working_memory is not None:
+            try:
+                self.working_memory.create_task(
+                    task_id=task_id,
+                    scope=scope,
+                    user_request=user_request,
+                    status=TaskStatus.PLANNING.value,
+                )
+                self.conversation = ConversationLog(
+                    task_id=task_id, store=self.working_memory,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to create persistent task row; continuing without persistence"
+                )
+                self.conversation = ConversationLog(task_id=task_id)
+        else:
+            self.conversation = ConversationLog(task_id=task_id)
+
         self._transition(TaskStatus.PLANNING)
 
         self.conversation.append({"role": "user", "content": user_request})
@@ -112,10 +147,21 @@ class AgentLoop:
 
             if not approved:
                 self._transition(TaskStatus.FAILED)
+                self._persist_terminal_result(success=False, summary="plan rejected")
                 console.print("[bold red]Plan rejected by user. Task cancelled.[/bold red]")
                 return self.current_task
 
             self.plan_approved = True
+            if self.working_memory is not None and self.current_task is not None:
+                try:
+                    self.working_memory.set_plan_approved(
+                        self.current_task.task_id, approved=True,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist plan-approval flag for task %s",
+                        self.current_task.task_id,
+                    )
             self._transition(TaskStatus.EXECUTING)
 
             console.print("\n[bold cyan]Phase 2: Executing approved plan[/bold cyan]")
@@ -125,14 +171,32 @@ class AgentLoop:
             })
             self._agent_loop(phase="execution")
             self._transition(TaskStatus.COMPLETE)
+            self._persist_terminal_result(success=True, summary="completed")
         else:
             console.print(
                 "[bold yellow]Agent did not produce a structured plan. "
                 "Task may have been answered directly.[/bold yellow]"
             )
             self._transition(TaskStatus.COMPLETE)
+            self._persist_terminal_result(success=True, summary="answered without plan")
 
         return self.current_task
+
+    def _persist_terminal_result(self, success: bool, summary: str) -> None:
+        """Stamp the final result_json on the persistent task row."""
+        if self.working_memory is None or self.current_task is None:
+            return
+        try:
+            self.working_memory.set_result(
+                task_id=self.current_task.task_id,
+                result_json=json.dumps({"success": success, "summary": summary}),
+                status=self.current_task.status.value,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist terminal result for task %s",
+                self.current_task.task_id,
+            )
 
     # ------------------------------------------------------------------
     # Agent loop (ReAct)
@@ -145,7 +209,7 @@ class AgentLoop:
 
             response = self.provider.chat(
                 system=self.system_prompt,
-                messages=self.conversation,
+                messages=self.conversation.as_messages(),
                 tools=self.tool_registry.get_tool_definitions(),
             )
 
@@ -263,6 +327,17 @@ class AgentLoop:
             plan = self._parse_plan(tool_input)
             if self.current_task:
                 self.current_task.plan = plan
+                if self.working_memory is not None:
+                    try:
+                        self.working_memory.set_plan(
+                            task_id=self.current_task.task_id,
+                            plan_json=json.dumps(tool_input, default=str),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist plan for task %s",
+                            self.current_task.task_id,
+                        )
             console.print("  [green]Plan registered[/green] — awaiting user approval")
             return {
                 "type": "tool_result",
@@ -381,7 +456,7 @@ class AgentLoop:
         if self.current_task:
             old = self.current_task.status
             self.current_task.status = new_status
-            self.current_task.updated_at = datetime.now(timezone.utc)
+            self.current_task.updated_at = datetime.now(UTC)
             logger.info(
                 "Task %s: %s → %s",
                 self.current_task.task_id,
@@ -389,6 +464,18 @@ class AgentLoop:
                 new_status.value,
             )
             console.print(f"[dim]State: {old.value} -> {new_status.value}[/dim]")
+            # Mirror the transition into working memory if persistence is on.
+            if self.working_memory is not None:
+                try:
+                    self.working_memory.update_task_status(
+                        task_id=self.current_task.task_id,
+                        status=new_status.value,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist status transition for task %s",
+                        self.current_task.task_id,
+                    )
 
     def _display_text(self, text: str) -> None:
         console.print(Markdown(text))
