@@ -25,7 +25,6 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from sf_dev_agent.paths import repo_root
-from sf_dev_agent.providers import PROVIDER_KEY_VARS
 
 console = Console()
 
@@ -278,8 +277,21 @@ def run_setup() -> None:
         border_style="cyan",
     ))
 
-    console.print("\n[bold]1. Checking sf CLI...[/bold]")
-    if not check_sf_cli():
+    console.print("\n[bold]1. Checking system prerequisites...[/bold]")
+    from sf_dev_agent.doctor import (
+        all_required_passing,
+        render_results,
+        run_all_checks,
+    )
+    # Skip the LLM-key check at wizard time — the user is about to set
+    # one in step 3, so the unset state isn't a blocker yet.
+    pre_results = [r for r in run_all_checks() if r.name != "LLM API key"]
+    console.print(render_results(pre_results))
+    if not all_required_passing(pre_results):
+        console.print(
+            "\n[bold red]Required prerequisites are missing.[/bold red] "
+            "Install them above and re-run [cyan]sf-agent setup[/cyan]."
+        )
         sys.exit(1)
 
     console.print("\n[bold]2. Pick a Salesforce org[/bold]")

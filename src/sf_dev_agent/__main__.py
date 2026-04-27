@@ -106,6 +106,11 @@ def main() -> None:
         from sf_dev_agent.memory_cli import run_memory_command
         sys.exit(run_memory_command(sys.argv[2:]))
 
+    # Special-case the doctor subcommand — system prereq check.
+    if len(sys.argv) >= 2 and sys.argv[1] == "doctor":
+        from sf_dev_agent.doctor import main as doctor_main
+        sys.exit(doctor_main(sys.argv[2:]))
+
     args = parse_args()
 
     logging.basicConfig(
