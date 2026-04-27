@@ -344,12 +344,26 @@ def launch_repl(
             except Exception:
                 logger.exception("Failed to close working memory")
 
-    # C.5 will hook the extract nudge here using session.completed_task_ids.
+    # C.5: extract-nudge — soft prompt to scan completed tasks for
+    # save-worthy memories. Honors `[yes / skip / no-and-stop-asking]`
+    # and a per-(tenant, org) sentinel; no-ops if there's nothing to
+    # extract or working memory is detached.
     if session.completed_task_ids:
-        console.print(
+        try:
+            from sf_dev_agent.extract_nudge import prompt_extract_if_needed
+            saved = prompt_extract_if_needed(session)
+        except Exception:
+            logger.exception("Extract nudge raised — continuing teardown")
+            saved = 0
+
+        msg = (
             f"[dim]Session ended. {len(session.completed_task_ids)} task(s) "
-            "ran this session.[/dim]"
+            "ran this session"
         )
+        if saved:
+            msg += f"; {saved} memories saved"
+        msg += ".[/dim]"
+        console.print(msg)
     else:
         console.print("[dim]Session ended.[/dim]")
     return 0
