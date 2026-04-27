@@ -14,8 +14,9 @@ import json
 import logging
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from sf_dev_agent.models.schemas import OrgConnection, ToolDefinition
 from sf_dev_agent.paths import agent_workspace
@@ -37,6 +38,7 @@ _SF_TOOLS = frozenset({
     "embed_knowledge_base",  # also calls Gemini embeddings
     "knowledge_search",      # embeds the query via Gemini
     "retrieve_context",      # fans out to vector layers; embeds the query via Gemini
+    "memory_recall",         # embeds the query via Gemini; save/list are pure local SQLite
 })
 
 
@@ -417,6 +419,15 @@ class ToolRegistry:
                             ],
                             "description": "Restrict knowledge layer to one category.",
                         },
+                        "memory_type": {
+                            "type": "string",
+                            "enum": ["user", "feedback", "project", "reference"],
+                            "description": (
+                                "Restrict memory layer to one type. Memories "
+                                "are scoped to the current tenant + org "
+                                "automatically."
+                            ),
+                        },
                     },
                     "required": ["query"],
                 },
@@ -562,6 +573,157 @@ class ToolRegistry:
                 read_only=True,
             ),
             executor=self._exec_knowledge_search,
+        )
+
+        # --- memory_save (write a project-memory row) -------------------
+        self.register(
+            ToolDefinition(
+                name="memory_save",
+                description=(
+                    "Persist a memory across sessions. Use the four-type "
+                    "taxonomy ported from Claude Code's auto-memory:\n"
+                    "  - user:      facts about the human (role, prefs, knowledge)\n"
+                    "  - feedback:  corrections AND validated non-obvious choices\n"
+                    "  - project:   ongoing work, decisions, deadlines\n"
+                    "  - reference: pointers to external systems (Linear, Grafana, etc.)\n\n"
+                    "Save WHEN you learn something durable that future sessions "
+                    "should know. Body convention: rule first, then a `**Why:**` "
+                    "line and a `**How to apply:**` line so future-you can judge "
+                    "edge cases. Memories scope to the current (tenant, org) "
+                    "automatically; pass `cross_org=True` to make a memory "
+                    "tenant-wide (no org pinning)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["user", "feedback", "project", "reference"],
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Short human-friendly handle (e.g., "
+                                "'merge-freeze-2026-03-05'). Used in citations."
+                            ),
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": (
+                                "One-line relevance hook. Used at recall time "
+                                "to decide if this memory matters for the "
+                                "current task. Be specific."
+                            ),
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": (
+                                "The memory content. For feedback / project: "
+                                "rule, then `**Why:**`, then `**How to apply:**`."
+                            ),
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional tags for filtering / future search.",
+                        },
+                        "cross_org": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, store with org_alias=NULL so the "
+                                "memory applies to every org under this tenant. "
+                                "Default false: scope to the current org."
+                            ),
+                            "default": False,
+                        },
+                    },
+                    "required": ["type", "name", "description", "body"],
+                },
+                read_only=False,
+            ),
+            executor=self._exec_memory_save,
+        )
+
+        # --- memory_recall (vector search over saved memories) -----------
+        self.register(
+            ToolDefinition(
+                name="memory_recall",
+                description=(
+                    "Retrieve memories relevant to the current task. Cosine-"
+                    "ranked over the embedding of `query`. Scoped to the "
+                    "current (tenant, org_alias OR NULL) automatically. "
+                    "Use this BEFORE making decisions about how to approach a "
+                    "task — past feedback, user preferences, and project "
+                    "context live here. Costs one Gemini embedding call."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "What you want to recall context for.",
+                        },
+                        "type": {
+                            "type": "string",
+                            "enum": ["user", "feedback", "project", "reference"],
+                            "description": "Restrict to one memory type. Omit for all.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default 5, max 25).",
+                            "default": 5,
+                        },
+                        "min_score": {
+                            "type": "number",
+                            "description": (
+                                "Drop hits below this cosine threshold (0..1). "
+                                "Default 0 (return all top-k)."
+                            ),
+                            "default": 0.0,
+                        },
+                    },
+                    "required": ["query"],
+                },
+                read_only=True,
+            ),
+            executor=self._exec_memory_recall,
+        )
+
+        # --- memory_list (browse without embedding the query) ------------
+        self.register(
+            ToolDefinition(
+                name="memory_list",
+                description=(
+                    "List memories in the current scope (tenant + org), newest "
+                    "first. No embedding cost — use this when you want to see "
+                    "what's stored, not search by meaning."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["user", "feedback", "project", "reference"],
+                            "description": "Restrict to one memory type. Omit for all.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max rows (default 25, max 100).",
+                            "default": 25,
+                        },
+                        "include_superseded": {
+                            "type": "boolean",
+                            "description": (
+                                "Include memories that have been replaced by a "
+                                "newer one (compaction). Default false."
+                            ),
+                            "default": False,
+                        },
+                    },
+                },
+                read_only=True,
+            ),
+            executor=self._exec_memory_list,
         )
 
         # --- embed_knowledge_base (auto-loads + embeds bundled entries) ---
@@ -1249,6 +1411,207 @@ class ToolRegistry:
             ],
         }
 
+    # ------------------------------------------------------------------
+    # Memory tier (Wave 8 slice 1)
+    # ------------------------------------------------------------------
+
+    def _memory_scope(self, cross_org: bool = False) -> MemoryScope:  # noqa: F821
+        """Build the MemoryScope for the current org.
+
+        `cross_org=True` drops the org pin so a memory applies tenant-wide.
+        Recall always uses the org-pinned scope (so it returns BOTH org-
+        specific and cross-org rows under that tenant — see _scope_clause).
+        """
+        from sf_dev_agent.memory import MemoryScope
+        return MemoryScope(
+            tenant_id=self.org.tenant_id,
+            org_alias=None if cross_org else self.org.org_alias,
+        )
+
+    def _exec_memory_save(
+        self,
+        type: str,
+        name: str,
+        description: str,
+        body: str,
+        tags: list[str] | None = None,
+        cross_org: bool = False,
+    ) -> dict[str, Any]:
+        """Persist a memory row, scoped to the current (tenant, org).
+
+        Embedding happens lazily — `memory_recall` does not auto-embed; the
+        first explicit recall after a save will only see this row if
+        `embed_memories` (or the orchestrator's batch embed) has run. This
+        mirrors the metadata-index / knowledge-base separation between
+        ingestion and embedding.
+        """
+        from sf_dev_agent.memory import MemoryStore
+
+        db_path = self._resolve_index_db_path()
+        scope = self._memory_scope(cross_org=cross_org)
+
+        try:
+            with MemoryStore(db_path) as store:
+                record = store.save(
+                    scope=scope,
+                    type=type,
+                    name=name,
+                    description=description,
+                    body=body,
+                    tags=tags or [],
+                )
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+        return {
+            "saved": True,
+            "id": record.id,
+            "type": record.type,
+            "name": record.name,
+            "tenant_id": record.tenant_id,
+            "org_alias": record.org_alias,
+            "created_at": record.created_at,
+            "note": (
+                "Embedding is lazy — recall will not return this row until "
+                "embeddings are refreshed. Run embed_memories or rely on the "
+                "orchestrator's batch embed."
+            ),
+        }
+
+    def _exec_memory_recall(
+        self,
+        query: str,
+        type: str | None = None,
+        limit: int = 5,
+        min_score: float = 0.0,
+    ) -> dict[str, Any]:
+        """Embed the query and rank memories in scope by cosine similarity."""
+        from sf_dev_agent.context import create_embedder
+        from sf_dev_agent.memory import MemoryStore
+
+        limit = max(1, min(limit, 25))
+
+        try:
+            try:
+                embedder = create_embedder(task_type="RETRIEVAL_QUERY")
+            except (TypeError, ValueError):
+                embedder = create_embedder()
+        except (ValueError, ImportError) as exc:
+            return {"error": f"Could not initialize embedder: {exc}"}
+
+        try:
+            query_vec = embedder.embed_one(query)
+        except Exception as exc:
+            return {"error": f"Embedding the query failed: {type(exc).__name__}: {exc}"}
+
+        db_path = self._resolve_index_db_path()
+        scope = self._memory_scope()
+
+        try:
+            with MemoryStore(db_path) as store:
+                hits = store.recall(
+                    query_embedding=query_vec,
+                    scope=scope,
+                    type=type,
+                    limit=limit,
+                )
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+        if not hits:
+            return {
+                "query": query,
+                "type": type,
+                "embedder": embedder.name,
+                "match_count": 0,
+                "results": [],
+                "note": (
+                    "No embedded memories in scope. Either nothing has been "
+                    "saved yet, or embeddings haven't been refreshed since "
+                    "the last save."
+                ),
+            }
+
+        filtered = [h for h in hits if h.score >= min_score]
+        if not filtered:
+            return {
+                "query": query,
+                "type": type,
+                "embedder": embedder.name,
+                "match_count": 0,
+                "best_score_below_threshold": hits[0].score,
+                "min_score": min_score,
+                "results": [],
+            }
+
+        return {
+            "query": query,
+            "type": type,
+            "embedder": embedder.name,
+            "match_count": len(filtered),
+            "results": [
+                {
+                    "id": h.record.id,
+                    "type": h.record.type,
+                    "name": h.record.name,
+                    "description": h.record.description,
+                    "body": h.record.body,
+                    "tags": h.record.tags,
+                    "tenant_id": h.record.tenant_id,
+                    "org_alias": h.record.org_alias,
+                    "created_at": h.record.created_at,
+                    "score": round(h.score, 4),
+                }
+                for h in filtered
+            ],
+        }
+
+    def _exec_memory_list(
+        self,
+        type: str | None = None,
+        limit: int = 25,
+        include_superseded: bool = False,
+    ) -> dict[str, Any]:
+        """List memories in scope without embedding cost."""
+        from sf_dev_agent.memory import MemoryStore
+
+        limit = max(1, min(limit, 100))
+        db_path = self._resolve_index_db_path()
+        scope = self._memory_scope()
+
+        try:
+            with MemoryStore(db_path) as store:
+                records = store.list(
+                    scope=scope,
+                    type=type,
+                    include_superseded=include_superseded,
+                    limit=limit,
+                )
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+        return {
+            "tenant_id": scope.tenant_id,
+            "org_alias": scope.org_alias,
+            "type": type,
+            "count": len(records),
+            "memories": [
+                {
+                    "id": r.id,
+                    "type": r.type,
+                    "name": r.name,
+                    "description": r.description,
+                    "tags": r.tags,
+                    "org_alias": r.org_alias,
+                    "created_at": r.created_at,
+                    "last_accessed_at": r.last_accessed_at,
+                    "access_count": r.access_count,
+                    "superseded_by": r.superseded_by,
+                }
+                for r in records
+            ],
+        }
+
     def _exec_retrieve_context(
         self,
         query: str,
@@ -1257,8 +1620,9 @@ class ToolRegistry:
         enrich_top_k: int = 3,
         component_type: str | None = None,
         knowledge_category: str | None = None,
+        memory_type: str | None = None,
     ) -> dict[str, Any]:
-        """Fan out to all three context layers, dedupe, graph-enrich, budget-trim."""
+        """Fan out to all four context layers, dedupe, graph-enrich, budget-trim."""
         from sf_dev_agent.context import retrieve_context
 
         db_path = self._resolve_index_db_path()
@@ -1273,6 +1637,8 @@ class ToolRegistry:
             enrich_top_k=enrich_top_k,
             component_type=component_type,
             knowledge_category=knowledge_category,
+            memory_scope=self._memory_scope(),
+            memory_type=memory_type,
         )
         return result.to_dict()
 

@@ -1,15 +1,16 @@
 """Retrieval Orchestrator — single entry point for cross-layer context.
 
-The hybrid context engine has three layers (each with its own tool):
+The hybrid context engine has four layers (each with its own tool):
 
     Layer 1: vector store    -> semantic_search   (cosine over component embeddings)
     Layer 2: metadata index  -> code_search       (substring) + sf_dependency_graph
     Layer 3: knowledge base  -> knowledge_search  (cosine over curated entries)
+    Layer 4: memory store    -> memory_recall     (cosine over project memories)
 
 Letting the agent itself orchestrate works, but every per-layer call is a
 separate LLM round-trip and the agent can simply forget to consult a layer.
 This module is the *programmatic* orchestrator the project summary called for:
-fan out to all three layers from a single query, dedupe + rank the merged
+fan out to all four layers from a single query, dedupe + rank the merged
 hits, optionally enrich top code hits with a one-hop graph walk, and truncate
 to a token budget so the assembled payload stays focused.
 
@@ -23,10 +24,12 @@ Public API:
     RetrievalResult
         The composed payload + provenance + budget metadata.
 
-Layer 1 and Layer 3 each cost one Gemini embedding API call for the query,
-not two — they share the embedding (Gemini's RETRIEVAL_QUERY task type is the
-same for both). Layer 2's literal search is offline. Graph enrichment is
-also offline. A typical call costs exactly one remote embedding.
+Layers 1, 3, and 4 each cost zero additional Gemini calls — the query is
+embedded once (RETRIEVAL_QUERY task type) and reused across all vector
+layers. Layer 2's literal search is offline. Graph enrichment is also
+offline. The memory layer is opt-in: pass `memory_scope` to surface it,
+otherwise it's skipped (single-tenant solo runs typically pass it; rare
+calls that don't want memory pollution leave it None).
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from typing import Any
 from sf_dev_agent.context.embedders import Embedder, create_embedder
 from sf_dev_agent.context.index import ComponentRow, MetadataIndex
 from sf_dev_agent.context.knowledge import KnowledgeBase
+from sf_dev_agent.memory import MemoryScope, MemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +68,7 @@ class ContextHit:
     edges get the parent hit's score minus a small penalty.
     """
 
-    source: str               # "semantic" | "literal" | "knowledge" | "graph"
+    source: str               # "semantic" | "literal" | "knowledge" | "memory" | "graph"
     kind: str                 # ComponentType, "knowledge_entry", or relationship_type
     title: str                # human-friendly identifier (api_name or knowledge title)
     body: str                 # the content already truncated to fit budget
@@ -131,12 +135,14 @@ def retrieve_context(
     component_type: str | None = None,
     per_hit_char_cap: int = DEFAULT_PER_HIT_CHAR_CAP,
     knowledge_category: str | None = None,
+    memory_scope: MemoryScope | None = None,
+    memory_type: str | None = None,
 ) -> RetrievalResult:
-    """Compose a focused context payload from all three layers.
+    """Compose a focused context payload from all four layers.
 
     The query is embedded once (Gemini RETRIEVAL_QUERY) and reused for the
-    semantic + knowledge layers. The literal layer needs no embedding. Graph
-    enrichment runs against the metadata index; it's offline.
+    semantic + knowledge + memory layers. The literal layer needs no
+    embedding. Graph enrichment runs against the metadata index; it's offline.
 
     Args:
         query: natural-language description of what to gather context for.
@@ -151,6 +157,10 @@ def retrieve_context(
         per_hit_char_cap: each hit's body is truncated to at most this many
             chars before the budget walk.
         knowledge_category: restrict knowledge layer to this category.
+        memory_scope: tenant + org_alias to pull memories from. None disables
+            the memory layer entirely (useful for one-shot/utility runs).
+        memory_type: restrict memory layer to one type
+            (`user` | `feedback` | `project` | `reference`).
 
     Returns:
         RetrievalResult with hits sorted by score desc, totals, and any
@@ -246,6 +256,28 @@ def retrieve_context(
             result.layer_counts["knowledge"] = 0
     else:
         result.layer_counts["knowledge"] = 0
+
+    # --- Layer 4: memory store -----------------------------------------
+    # Memory is opt-in: callers without a scope (or with no embedder) skip it.
+    if query_embedding is not None and memory_scope is not None:
+        try:
+            mem_hits = _layer_memory(
+                db_path=db_path,
+                query_embedding=query_embedding,
+                scope=memory_scope,
+                memory_type=memory_type,
+                limit=max_per_layer,
+                char_cap=per_hit_char_cap,
+            )
+            candidates.extend(mem_hits)
+            result.layer_counts["memory"] = len(mem_hits)
+        except Exception as exc:
+            result.layer_errors.append(
+                f"memory layer: {type(exc).__name__}: {exc}"
+            )
+            result.layer_counts["memory"] = 0
+    else:
+        result.layer_counts["memory"] = 0
 
     # --- Dedupe code hits across semantic + literal --------------------
     deduped = _dedupe_by_component(candidates)
@@ -390,6 +422,52 @@ def _layer_knowledge(
                 "severity": entry.severity,
                 "tags": list(entry.tags),
                 "references": list(entry.references),
+            },
+        ))
+    return out
+
+
+def _layer_memory(
+    *,
+    db_path: Path,
+    query_embedding,
+    scope: MemoryScope,
+    memory_type: str | None,
+    limit: int,
+    char_cap: int,
+) -> list[ContextHit]:
+    """Cosine recall over project memories scoped to (tenant_id, org_alias)."""
+    with MemoryStore(db_path) as store:
+        hits = store.recall(
+            query_embedding=query_embedding,
+            scope=scope,
+            type=memory_type,
+            limit=limit,
+        )
+    out: list[ContextHit] = []
+    for hit in hits:
+        rec = hit.record
+        # The body the agent reads = description (one-line hook) + the rule body.
+        # This mirrors how Claude Code's auto-memory presents stored memories.
+        composed = f"{rec.description}\n\n{rec.body}" if rec.description else rec.body
+        body = _truncate(composed, char_cap)
+        out.append(ContextHit(
+            source="memory",
+            kind=rec.type,
+            title=rec.name,
+            body=body,
+            score=_clip01(float(hit.score)),
+            component_id=None,
+            citation=f"memory:{rec.type}:{rec.name}",
+            metadata={
+                "id": rec.id,
+                "tenant_id": rec.tenant_id,
+                "org_alias": rec.org_alias,
+                "tags": list(rec.tags),
+                "source_session_id": rec.source_session_id,
+                "created_at": rec.created_at,
+                "last_accessed_at": rec.last_accessed_at,
+                "access_count": rec.access_count,
             },
         ))
     return out

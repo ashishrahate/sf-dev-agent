@@ -74,3 +74,38 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge_entries(category);
 CREATE INDEX IF NOT EXISTS idx_knowledge_severity ON knowledge_entries(severity);
+
+-- Memory tier (Wave 8 slice 1) — project memory, scoped per (tenant_id, org_alias).
+-- Working memory is NOT in this table; conversation persistence is deferred.
+-- Same embedding shape as components / knowledge_entries (BLOB + content hash).
+--
+-- Type taxonomy is ported from Claude Code's auto-memory:
+--   user      -> facts about the human user (role, preferences, knowledge)
+--   feedback  -> corrections + validated non-obvious choices
+--   project   -> ongoing work, decisions, deadlines
+--   reference -> pointers to external systems (dashboards, ticket projects)
+--
+-- `superseded_by` points at the row that replaced this one during compaction;
+-- the original is kept (not deleted) for auditability.
+CREATE TABLE IF NOT EXISTS memories (
+    id                    TEXT PRIMARY KEY,           -- "<tenant>:<org>:<slug>" stable across runs
+    tenant_id             TEXT NOT NULL,              -- multi-tenant from day one (single-tenant runtime today)
+    org_alias             TEXT,                       -- NULL = applies to all orgs in the tenant
+    type                  TEXT NOT NULL,              -- user | feedback | project | reference
+    name                  TEXT NOT NULL,              -- short human-friendly handle
+    description           TEXT NOT NULL,              -- one-line relevance hook (used at recall ranking time)
+    body                  TEXT NOT NULL,              -- the memory content (rule + Why + How to apply)
+    tags_json             TEXT NOT NULL DEFAULT '[]', -- JSON array of strings
+    source_session_id     TEXT,                       -- provenance: which session wrote this
+    created_at            TEXT NOT NULL,              -- ISO-8601 UTC
+    last_accessed_at      TEXT NOT NULL,              -- bumped by recall(); used for decay (slice 2)
+    access_count          INTEGER NOT NULL DEFAULT 0, -- bumped by recall()
+    superseded_by         TEXT,                       -- compaction link to a newer memory.id
+    embedding             BLOB,                       -- float32 vector via .tobytes()
+    embedded_text_hash    TEXT,                       -- sha256 of embedded text; gates re-embed
+    FOREIGN KEY (superseded_by) REFERENCES memories(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_scope     ON memories(tenant_id, org_alias);
+CREATE INDEX IF NOT EXISTS idx_memories_type      ON memories(type);
+CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);

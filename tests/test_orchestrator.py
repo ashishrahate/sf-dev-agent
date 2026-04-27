@@ -13,15 +13,15 @@ from pathlib import Path
 import pytest
 
 from sf_dev_agent.context import (
+    ContextHit,
     KnowledgeBase,
     MetadataIndex,
     MockEmbedder,
-    ContextHit,
     RetrievalResult,
     ingest_directory,
     retrieve_context,
 )
-
+from sf_dev_agent.memory import MemoryScope, MemoryStore
 
 # ---------------------------------------------------------------------------
 # Fixture index — code with body diversity so semantic + literal hit
@@ -347,6 +347,130 @@ def test_retrieve_context_layer_failure_isolated(
 # ---------------------------------------------------------------------------
 # to_dict serialization (what the tool layer returns)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Memory layer (Wave 8 slice 1) — 4th source
+# ---------------------------------------------------------------------------
+
+def test_retrieve_context_memory_layer_off_by_default(populated_db: Path) -> None:
+    """No memory_scope => memory layer is skipped (count = 0, no hits)."""
+    embedder = MockEmbedder(dim=64)
+    result = retrieve_context(
+        query="duplicate account detection",
+        db_path=populated_db,
+        embedder=embedder,
+        max_tokens=8000,
+    )
+    assert result.layer_counts["memory"] == 0
+    assert "memory" not in {h.source for h in result.hits}
+
+
+def test_retrieve_context_memory_surfaces_when_scoped(populated_db: Path) -> None:
+    """Saving a memory under (tenant, org) makes it recallable as a 4th source."""
+    embedder = MockEmbedder(dim=64)
+    scope = MemoryScope(tenant_id="t1", org_alias="OrgA")
+
+    with MemoryStore(populated_db) as store:
+        store.save(
+            scope=scope, type="feedback", name="dedup-pref",
+            description="prefer email+phone match for account dedup",
+            body="When detecting duplicate accounts, match on Email__c + Phone.",
+        )
+        store.embed_pending(embedder)
+
+    result = retrieve_context(
+        query="duplicate account detection",
+        db_path=populated_db,
+        embedder=embedder,
+        memory_scope=scope,
+        max_tokens=8000,
+    )
+    assert result.layer_counts["memory"] >= 1
+    sources = {h.source for h in result.hits}
+    assert "memory" in sources
+
+    mem_hits = [h for h in result.hits if h.source == "memory"]
+    top = mem_hits[0]
+    assert top.kind == "feedback"
+    assert top.title == "dedup-pref"
+    assert top.citation.startswith("memory:")
+
+
+def test_retrieve_context_memory_type_filter(populated_db: Path) -> None:
+    """memory_type narrows the layer to that taxonomy bucket."""
+    embedder = MockEmbedder(dim=64)
+    scope = MemoryScope(tenant_id="t1", org_alias="OrgA")
+
+    with MemoryStore(populated_db) as store:
+        store.save(scope=scope, type="user", name="role",
+                   description="senior platform engineer", body="senior eng")
+        store.save(scope=scope, type="feedback", name="bulk-pref",
+                   description="prefer bulk inserts", body="bulk over single")
+        store.embed_pending(embedder)
+
+    result = retrieve_context(
+        query="engineer preference",
+        db_path=populated_db,
+        embedder=embedder,
+        memory_scope=scope,
+        memory_type="user",
+        max_tokens=8000,
+    )
+    mem_hits = [h for h in result.hits if h.source == "memory"]
+    assert mem_hits, "Expected at least one memory hit"
+    assert all(h.kind == "user" for h in mem_hits)
+
+
+def test_retrieve_context_memory_scope_excludes_other_tenants(
+    populated_db: Path,
+) -> None:
+    """A memory under tenant t2 must not surface for a t1 query."""
+    embedder = MockEmbedder(dim=64)
+    other_scope = MemoryScope(tenant_id="t2", org_alias="OrgZ")
+
+    with MemoryStore(populated_db) as store:
+        store.save(
+            scope=other_scope, type="feedback", name="t2-only",
+            description="duplicate account guidance for t2",
+            body="t2-only content about duplicate accounts",
+        )
+        store.embed_pending(embedder)
+
+    my_scope = MemoryScope(tenant_id="t1", org_alias="OrgA")
+    result = retrieve_context(
+        query="duplicate account",
+        db_path=populated_db,
+        embedder=embedder,
+        memory_scope=my_scope,
+        max_tokens=8000,
+    )
+    titles = {h.title for h in result.hits if h.source == "memory"}
+    assert "t2-only" not in titles
+
+
+def test_retrieve_context_memory_layer_failure_isolated(
+    populated_db: Path, monkeypatch
+) -> None:
+    """A crash in the memory layer must NOT kill the call — others still run."""
+    from sf_dev_agent.context import orchestrator as orch
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated memory layer crash")
+
+    monkeypatch.setattr(orch, "_layer_memory", boom)
+
+    embedder = MockEmbedder(dim=64)
+    scope = MemoryScope(tenant_id="t1", org_alias="OrgA")
+    result = retrieve_context(
+        query="account",
+        db_path=populated_db,
+        embedder=embedder,
+        memory_scope=scope,
+    )
+    assert any("memory layer" in e for e in result.layer_errors)
+    # Other layers still surface results.
+    assert {h.source for h in result.hits} - {"memory"}
+
 
 def test_retrieve_context_to_dict_has_expected_keys(populated_db: Path) -> None:
     embedder = MockEmbedder(dim=64)

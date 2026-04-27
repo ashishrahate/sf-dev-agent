@@ -500,14 +500,49 @@ Parameters:
 - `query` (required): Natural language query — e.g., "trigger recursion prevention pattern"
 - `categories` (optional): Filter by category — "apex", "lwc", "flow", "security", "integration", "testing", "deployment", "governor-limits"
 
+### memory_save
+Persists a memory across sessions, scoped to the current (tenant, org). Use the four-type taxonomy:
+
+- **user** — facts about the human user (role, preferences, knowledge). Tailor future behavior.
+- **feedback** — corrections AND validated non-obvious choices. Save the *why*; future-you needs it to judge edge cases.
+- **project** — ongoing work, decisions, deadlines. Convert relative dates to absolute (e.g., "Thursday" → "2026-03-05").
+- **reference** — pointers to external systems (Linear, Grafana, Slack channels) and what they're for.
+
+**When to save** — when you learn something durable that future sessions should know:
+- The user corrects your approach ("don't mock the database here, …").
+- The user *confirms* a non-obvious choice ("yes, the bundled PR was right"). Save these too — silent confirmations are easy to miss.
+- A constraint, deadline, or external system gets named.
+- A decision is made that wouldn't be obvious from the code alone.
+
+**Body convention** — for `feedback` and `project`: lead with the rule or fact, then a `**Why:**` line and a `**How to apply:**` line. Without the *why*, future-you can't judge whether the rule still applies in an edge case.
+
+**What NOT to save** — code patterns / file paths / architecture (derive from current state); git history (use `git log`); ephemeral debugging context; anything already in CLAUDE.md.
+
+Write operation. Approval required (so the human sees what's being persisted before it's stored).
+
+Parameters: `type`, `name` (short handle), `description` (one-line relevance hook), `body`, `tags?`, `cross_org?` (default false; set true for tenant-wide memories like user preferences).
+
 ### memory_recall
-Retrieves relevant memories from past sessions for this tenant. Returns past decisions, preferences, warnings, and context from previous tasks.
+Vector-recall over saved memories, scoped to the current tenant + org. Returns past decisions, preferences, corrections, and project context relevant to the current query.
+
+**Use this BEFORE making decisions** — past feedback and constraints live here. The orchestrator's `retrieve_context` already includes memory as a 4th source for open-ended queries; use `memory_recall` directly when you specifically want the memory cut.
+
+**Verify before acting on a memory** — a memory naming a path/function/flag is a *claim* that was true when written. If you're about to act on it, re-check current state (grep, read the file) before proceeding. If a recalled memory conflicts with what you observe now, trust observation and update or remove the stale memory.
 
 Read-only. No approval required.
 
 Parameters:
-- `query` (required): What context are you looking for — e.g., "previous work on Account triggers"
-- `limit` (optional, default 10): Maximum memories to return.
+- `query` (required): What you want to recall context for.
+- `type` (optional): Restrict to one of `user | feedback | project | reference`.
+- `limit` (optional, default 5, max 25): Maximum memories to return.
+- `min_score` (optional, default 0): Drop hits below this cosine threshold.
+
+### memory_list
+Browse memories in scope without an embedding cost. Use this when you want to see what's stored, not search by meaning.
+
+Read-only. No approval required.
+
+Parameters: `type?`, `limit?` (default 25, max 100), `include_superseded?` (default false).
 
 ### file_write
 Creates or modifies a file in the local project workspace. This is a write operation — requires an approved plan.
