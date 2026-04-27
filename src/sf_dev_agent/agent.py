@@ -28,7 +28,7 @@ from sf_dev_agent.models.schemas import (
     TaskStatus,
 )
 from sf_dev_agent.prompts import load_system_prompt
-from sf_dev_agent.providers.base import LLMProvider
+from sf_dev_agent.providers.base import LLMProvider, consume_stream
 from sf_dev_agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -78,12 +78,18 @@ class AgentLoop:
         max_iterations: int = 50,
         mock_org: bool = False,
         working_memory: WorkingMemoryStore | None = None,
+        streaming: bool = False,
     ) -> None:
         self.org = org
         self.provider = provider
         self.max_iterations = max_iterations
         self.tool_registry = ToolRegistry(org=org, mock_org=mock_org)
         self.working_memory = working_memory
+        # Streaming = render assistant text deltas live as they arrive
+        # from the provider. The REPL turns this on; one-shot CLI keeps
+        # the buffered Markdown render. Both go through chat_stream
+        # under the hood; the flag only changes presentation.
+        self.streaming = streaming
         # Initialized for real in run() once the task_id is known. Until
         # then we use a placeholder ConversationLog with no store so the
         # type stays consistent and providers can still iterate it.
@@ -357,23 +363,45 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     def _agent_loop(self, phase: str) -> None:
-        """Run the ReAct loop: call LLM, process tool calls, repeat."""
+        """Run the ReAct loop: call LLM, process tool calls, repeat.
+
+        Always goes through `chat_stream` under the hood. With
+        `self.streaming=True` (REPL), text deltas render live as they
+        arrive. With `self.streaming=False` (one-shot CLI), deltas are
+        buffered and rendered as Markdown at end-of-message — same UX
+        as the pre-streaming code path.
+        """
         for iteration in range(self.max_iterations):
             logger.info("Agent loop iteration %d (phase=%s)", iteration + 1, phase)
 
-            response = self.provider.chat(
+            chunks = self.provider.chat_stream(
                 system=self.system_prompt,
                 messages=self.conversation.as_messages(),
                 tools=self.tool_registry.get_tool_definitions(),
             )
 
-            # Rebuild assistant content blocks in internal format
+            if self.streaming:
+                # Print each delta to the live terminal as it arrives.
+                # Markdown formatting can't be applied incrementally, so
+                # use raw print here; the user sees tokens stream by.
+                response = consume_stream(
+                    chunks,
+                    on_text=lambda t: console.print(t, end="", soft_wrap=True),
+                )
+                if response.text_blocks:
+                    # Terminate the streaming line cleanly.
+                    console.print()
+            else:
+                response = consume_stream(chunks)
+                for text in response.text_blocks:
+                    self._display_text(text)
+
+            # Rebuild assistant content blocks in internal format.
             assistant_content: list[dict[str, Any]] = []
             tool_calls: list[dict[str, Any]] = []
 
             for text in response.text_blocks:
                 assistant_content.append({"type": "text", "text": text})
-                self._display_text(text)
 
             for tc in response.tool_calls:
                 assistant_content.append({

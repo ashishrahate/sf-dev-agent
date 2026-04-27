@@ -130,6 +130,7 @@ class ReplSession:
                 provider=self.provider,
                 mock_org=self.mock_org,
                 working_memory=self.working_memory,
+                streaming=True,
             )
             task = agent.run(line)
             if task is not None:

@@ -7,7 +7,16 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Iterator
 from typing import Any
+
+from sf_dev_agent.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    StreamChunk,
+    StreamChunkKind,
+    ToolCall,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -20,8 +29,6 @@ except ImportError as exc:
         "google-genai package not installed. "
         "Run: uv pip install 'sf-dev-agent[gemini]'"
     ) from exc
-
-from sf_dev_agent.providers.base import LLMProvider, LLMResponse, ToolCall
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 
@@ -128,6 +135,110 @@ class GeminiProvider(LLMProvider):
             text_blocks=text_blocks,
             tool_calls=tool_calls,
             stop_reason="tool_use" if tool_calls else "end_turn",
+        )
+
+    # ------------------------------------------------------------------
+    # Streaming (Phase C.2)
+    # ------------------------------------------------------------------
+
+    def chat_stream(
+        self,
+        *,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_tokens: int = 16384,
+    ) -> Iterator[StreamChunk]:
+        """Real streaming for Gemini — text deltas land mid-message.
+
+        Function calls are NOT delta-streamed by the Gemini API (they
+        arrive complete in a single chunk). We accumulate them across
+        the stream and emit TOOL_USE_START + END pairs at the end with
+        the full parsed input. The agent loop handles either shape via
+        `consume_stream` in `providers/base.py`.
+
+        No mid-stream retry on 429s — partial output would have to be
+        replayed which is fragile. Users who hit transient quota errors
+        can fall back to non-streaming via the agent's `streaming=False`
+        path; that has the existing 4-attempt retry loop.
+        """
+        gemini_tools = (
+            [types.Tool(function_declarations=[
+                types.FunctionDeclaration(
+                    name=t["name"],
+                    description=t["description"],
+                    parameters=t["parameters"],
+                )
+                for t in tools
+            ])]
+            if tools else None
+        )
+
+        config = types.GenerateContentConfig(
+            system_instruction=system,
+            tools=gemini_tools,
+            max_output_tokens=max_tokens,
+        )
+
+        pending_function_calls: list[Any] = []
+
+        try:
+            stream = self._get_client().models.generate_content_stream(
+                model=self._model,
+                contents=self._convert_messages(messages),
+                config=config,
+            )
+            for chunk in stream:
+                candidates = getattr(chunk, "candidates", None) or []
+                for candidate in candidates:
+                    content = getattr(candidate, "content", None)
+                    if content is None:
+                        continue
+                    parts = getattr(content, "parts", None) or []
+                    for part in parts:
+                        text = getattr(part, "text", None)
+                        if text:
+                            yield StreamChunk(
+                                kind=StreamChunkKind.TEXT_DELTA, text=text,
+                            )
+                            continue
+                        fn = getattr(part, "function_call", None)
+                        if fn is not None and fn.name:
+                            pending_function_calls.append(fn)
+        except genai_errors.ClientError as exc:
+            # Same friendly error mapping as chat(), without retries.
+            is_429 = "429" in str(exc) or getattr(exc, "code", None) == 429
+            if is_429 and "limit: 0" in str(exc):
+                raise RuntimeError(
+                    f"Model '{self._model}' has no free-tier quota on this "
+                    "API key. Enable billing at console.cloud.google.com or "
+                    "try a different model."
+                ) from exc
+            if is_429 and ("PerDay" in str(exc) or "per_day" in str(exc).lower()):
+                raise RuntimeError(
+                    f"Daily free-tier quota exhausted for '{self._model}'. "
+                    "Options: a NEW Google AI Studio project, enable billing, "
+                    "or run with --mock-org for offline testing."
+                ) from exc
+            raise
+
+        # Emit any accumulated function calls as START/END pairs (Gemini
+        # doesn't delta-stream them, so there are no JSON fragments).
+        for fc in pending_function_calls:
+            tool_id = f"gemini_{uuid.uuid4().hex[:12]}"
+            input_data = dict(fc.args) if fc.args else {}
+            yield StreamChunk(
+                kind=StreamChunkKind.TOOL_USE_START,
+                tool_id=tool_id, tool_name=fc.name,
+            )
+            yield StreamChunk(
+                kind=StreamChunkKind.TOOL_USE_END,
+                tool_id=tool_id, tool_input=input_data,
+            )
+
+        yield StreamChunk(
+            kind=StreamChunkKind.STOP,
+            stop_reason="tool_use" if pending_function_calls else "end_turn",
         )
 
     # ------------------------------------------------------------------
