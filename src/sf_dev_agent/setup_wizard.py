@@ -320,8 +320,8 @@ def run_setup() -> None:
     console.print(Panel(
         "[bold green]Setup complete.[/bold green]\n\n"
         "Try a read-only run:\n"
-        "  [cyan]uv run python -m sf_dev_agent \"List all Apex classes in the org\"[/cyan]\n\n"
+        "  [cyan]sf-agent \"List all Apex classes in the org\"[/cyan]\n\n"
         "Or jump straight into the REPL:\n"
-        "  [cyan]uv run python -m sf_dev_agent[/cyan]",
+        "  [cyan]sf-agent[/cyan]",
         border_style="green",
     ))

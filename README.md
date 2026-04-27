@@ -18,11 +18,13 @@ It is **provider-agnostic** — works with Anthropic Claude, OpenAI GPT, or Goog
 git clone https://github.com/ashishrahate/sf-dev-agent
 cd sf-dev-agent
 uv sync && uv pip install -e '.[gemini]'    # pick your provider here
-uv run python -m sf_dev_agent setup         # interactive wizard
-uv run python -m sf_dev_agent "List all Apex classes in the org"
+sf-agent doctor                              # verify system prereqs
+sf-agent setup                               # interactive wizard
+sf-agent "List all Apex classes in the org"  # one-shot task
+sf-agent                                     # interactive REPL (no args)
 ```
 
-That's the whole flow. The wizard handles everything else.
+That's the whole flow. After `uv pip install -e .` the `sf-agent` and `sfagent` binaries land on PATH — no `uv run` prefix needed.
 
 ---
 
@@ -47,13 +49,13 @@ The wizard prompts for the two on the left and writes a minimal `.env` for you.
 | **Salesforce CLI** | Talks to your org | `npm install -g @salesforce/cli` (Node 18+) |
 | **An LLM API key** | The agent's brain | One of: Gemini (free), OpenAI, or Anthropic |
 
-Verify each:
+Verify all prereqs in one go:
 
 ```bash
-python --version    # 3.12+
-uv --version
-sf --version        # 2.100+
+sf-agent doctor
 ```
+
+Probes Python / uv / Node / sf CLI / git and your LLM API key, and prints a color-coded table with the exact install command for any missing item on your OS. Run `sf-agent doctor --install` to print copy-paste install commands for everything that's red.
 
 > **No Salesforce org yet?** Sign up free at [developer.salesforce.com/signup](https://developer.salesforce.com/signup) — pick "Developer Edition." Free forever, real org.
 
@@ -62,12 +64,12 @@ sf --version        # 2.100+
 ## The setup wizard
 
 ```bash
-uv run python -m sf_dev_agent setup
+sf-agent setup
 ```
 
 The wizard will:
 
-1. Verify `sf` CLI is installed
+1. Run `sf-agent doctor` first; refuses to proceed if any required tool is missing
 2. Show your connected orgs in a numbered menu (or run `sf org login web` if you have none)
 3. Let you pick an LLM provider — links you to the exact key page
 4. Validate the key with a one-token test call (fail-fast on bad keys)
@@ -81,16 +83,16 @@ After it finishes, you're done — go straight to "Running the agent."
 
 ```bash
 # One-shot
-uv run python -m sf_dev_agent "Create an Account trigger that prevents duplicate Phone numbers"
+sf-agent "Create an Account trigger that prevents duplicate Phone numbers"
 
-# Interactive REPL
-uv run python -m sf_dev_agent
+# Interactive REPL (Claude-Code-style — type once, then chat freely)
+sf-agent
 
 # Override the provider for a single run
-uv run python -m sf_dev_agent --provider openai "..."
+sf-agent --provider openai "..."
 
 # Test the loop without touching your org or burning LLM tokens
-uv run python -m sf_dev_agent --mock-org "Create a trigger"
+sf-agent --mock-org "Create a trigger"
 ```
 
 When you ask for something that creates/modifies metadata, the agent:
@@ -99,6 +101,27 @@ When you ask for something that creates/modifies metadata, the agent:
 2. Submits an **execution plan** with steps, risk level, rollback strategy, and impact counts.
 3. Pauses at: `Approve this plan? [yes/no/modify]`
 4. On `yes`, writes files to `workspace/force-app/main/default/` and runs `sf project deploy start` against your org with the test class.
+
+**First run against a new org** — the agent will soft-prompt to warm the context engine (build the metadata index, embed components, embed the bundled knowledge base). It's a one-time ~30–90s setup; pick `skip` to defer or `no-and-stop-asking` to suppress it permanently for that org. The freshness state is pinned in every run's system prompt, so the agent self-detects when the index has gone stale and calls `build_metadata_index --delta` mid-task.
+
+---
+
+## Subcommand reference
+
+| Command | What it does |
+|---|---|
+| `sf-agent` (no args) | Launch the interactive REPL. Type freely; no prefix needed. |
+| `sf-agent "<request>"` | One-shot task. Process exits when the task ends — useful for scripts. |
+| `sf-agent setup` | Interactive wizard: runs `doctor`, picks an org, picks a provider, writes `.env`. |
+| `sf-agent doctor` | Probe system prereqs (Python / uv / Node / sf CLI / git / LLM key). `--install` prints copy-paste install commands. |
+| `sf-agent resume <task-id>` | Pick up a persisted task that crashed, was paused, or is awaiting approval. |
+| `sf-agent resume --list` | Show in-flight tasks (status / plan state / description / age). |
+| `sf-agent resume --latest` | Resume the most-recent in-flight task. |
+| `sf-agent memory extract --task-id <id>` | Scan a completed task's transcript for save-worthy moments — confirms each candidate before saving. |
+| `sf-agent memory export [--type] [--out]` | Dump memories to Markdown for backup / git versioning. |
+| `sf-agent memory promote --memory-id <id> --category <cat>` | Draft a knowledge-base entry from a project memory. Heuristic-blocked on tenant-specific content; `--force` to override. |
+
+`sfagent` (no hyphen) is an alias for the same binary if you prefer fewer keystrokes.
 
 ---
 

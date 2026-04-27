@@ -1,10 +1,16 @@
 """CLI entry point for the Salesforce Developer Agent.
 
+After `uv pip install -e .`, the binaries `sf-agent` and `sfagent` are
+installed on PATH. Both invoke this entry point.
+
 Usage:
-    uv run python -m sf_dev_agent setup                          # interactive wizard
-    uv run python -m sf_dev_agent                                # interactive REPL
-    uv run python -m sf_dev_agent "Create an Account trigger"    # one-shot
-    uv run python -m sf_dev_agent --provider gemini "..."        # provider override
+    sf-agent setup                          # interactive wizard
+    sf-agent doctor                         # system prereq check
+    sf-agent                                # interactive REPL
+    sf-agent "Create an Account trigger"    # one-shot task
+    sf-agent --provider gemini "..."        # provider override
+    sf-agent resume <task-id>               # resume a persisted task
+    sf-agent memory <verb>                  # extract / export / promote
 """
 
 from __future__ import annotations
@@ -126,7 +132,7 @@ def main() -> None:
     if not args.org_alias:
         console.print(
             "[bold red]No Salesforce org configured.[/bold red] "
-            "Run [cyan]uv run python -m sf_dev_agent setup[/cyan] to get started, "
+            "Run [cyan]sf-agent setup[/cyan] to get started, "
             "or set SF_ORG_ALIAS in your .env file."
         )
         sys.exit(1)

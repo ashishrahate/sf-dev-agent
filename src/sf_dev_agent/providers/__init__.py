@@ -55,7 +55,7 @@ def create_provider(
             raise ValueError(
                 "No LLM provider configured. Set one of "
                 f"{', '.join(PROVIDER_KEY_VARS.values())} in .env, "
-                "or run: uv run python -m sf_dev_agent setup"
+                "or run: sf-agent setup"
             )
         raise ValueError(
             f"Multiple API keys are set ({', '.join(set_keys)}). "

@@ -316,7 +316,9 @@ After reviewing Part 2, the user locked the following decisions. **This addendum
 
 Independently shippable; useful before the REPL lands.
 
-### B.1 — `sf-agent doctor` (~0.5 day)
+**Status:** B.1 ✅ · B.2 ✅ · B.3 ✅ · B.4 ✅ — phase B complete.
+
+### B.1 ✅ — `sf-agent doctor` (~0.5 day) — `e67a161`
 
 Probes Python / uv / Node / sf CLI / git / LLM API key. `rich` table output. `--install` flag for best-effort install via detected package manager (winget / brew / apt).
 
@@ -324,7 +326,7 @@ Wired into the setup wizard (refuses to proceed on red); special-case dispatch i
 
 Files: `src/sf_dev_agent/doctor.py` (~150 LOC), `tests/test_doctor.py`.
 
-### B.2 — Auto-warm context engine + staleness check (~1 day) [SOFT prompt]
+### B.2 ✅ — Auto-warm context engine + staleness check (~1 day) — `38f6c19`
 
 **Layer A — first-run prompt:**
 - New `src/sf_dev_agent/index_freshness.py` with `IndexFreshness(last_built_at, age_seconds, is_stale, embedding_coverage_pct)`.
@@ -339,7 +341,7 @@ Files: `src/sf_dev_agent/doctor.py` (~150 LOC), `tests/test_doctor.py`.
 
 Files: `index_freshness.py` (~100 LOC), `tools/registry.py` (new tool), `prompts/system_prompt.md` ({INDEX_FRESHNESS} placeholder).
 
-### B.3 — `sf-agent resume <task-id>` CLI verb (~0.5 day)
+### B.3 ✅ — `sf-agent resume <task-id>` CLI verb (~0.5 day) — `e8d89bb`
 
 Capability built (Wave 8 slice 2b). Only the CLI plumbing.
 
@@ -349,11 +351,12 @@ Capability built (Wave 8 slice 2b). Only the CLI plumbing.
 
 Files: `src/sf_dev_agent/resume_cli.py` (~80 LOC), `__main__.py` dispatch, `tests/test_resume_cli.py`.
 
-### B.4 — Documentation refresh + alias (~0.25 day, alias already done)
+### B.4 ✅ — Documentation refresh + alias (~0.25 day) — this commit
 
-- ✅ `sfagent` no-hyphen alias added to `pyproject.toml` (this addendum's commit).
-- README: replace `uv run python -m sf_dev_agent` with `sf-agent` / `sfagent` everywhere it makes sense.
-- ROADMAP.md: tick off B items as they ship.
+- ✅ `sfagent` no-hyphen alias in `pyproject.toml` (`18686a8`).
+- ✅ README: replaced `uv run python -m sf_dev_agent` with `sf-agent` everywhere; added unified Subcommand reference table; updated Prerequisites to recommend `sf-agent doctor`; mentioned auto-warm in Running the agent.
+- ✅ Source-side `uv run python -m sf_dev_agent` references swept (setup wizard exit message, `__main__.py` docstring + no-org error, providers' no-key error).
+- ✅ ROADMAP.md: B.1 / B.2 / B.3 / B.4 marked shipped with commit hashes.
 
 ---
 

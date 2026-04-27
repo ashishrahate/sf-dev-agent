@@ -242,7 +242,7 @@ Two design pivots were proposed and reverted during Wave 8. Documented here so t
 
 Wave 8 closes the memory architecture. Remaining roadmap items, ordered by leverage:
 
-1. **UX wins** — phase B in `ROADMAP.md`: `sf-agent doctor` (prereq check), `sf-agent resume` CLI verb (the resume capability already exists from slice 2b — only the CLI plumbing is missing), auto-warm context engine + staleness check, end-of-session extract nudge.
-2. **Persistent REPL** — phase C in `ROADMAP.md`: `prompt_toolkit`-based terminal session with slash commands. Replaces the basic `Prompt.ask` REPL; absorbs `/resume`, `/extract`, `/refresh-index`, `/status`.
+1. **UX wins** — phase B in `ROADMAP.md`: ✅ shipped end-to-end. `sf-agent doctor` (`e67a161`), auto-warm context engine + staleness check (`38f6c19`), `sf-agent resume` CLI verb (`e8d89bb`), and the docs/alias refresh. Single-binary install — no `uv run` prefix needed; `sf-agent` and `sfagent` both work.
+2. **Persistent REPL** — phase C in `ROADMAP.md`: `prompt_toolkit`-based terminal session with slash commands, streaming output, ESC interrupt, resume-by-LLM-intent (3-tool intercepted pattern), extract nudge at `/quit`. Replaces the basic `Prompt.ask` REPL; absorbs `/resume`, `/extract`, `/refresh-index`, `/status`.
 3. **Real-org pressure test** of the now-4-layer orchestrator (held until org access).
 4. **Production planes** — control + execution. Auth, tenancy, orchestration API, structured audit, billing, containerization, network egress lockdown. These are product/platform work, not agent work; they live in `ROADMAP.md` Part 1.
