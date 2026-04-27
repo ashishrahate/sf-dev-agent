@@ -23,7 +23,6 @@ import sys
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt
 
 from sf_dev_agent.agent import AgentLoop
 from sf_dev_agent.models.schemas import OrgConnection
@@ -173,37 +172,37 @@ def main() -> None:
     from sf_dev_agent.warmup import prompt_warmup_if_needed
     prompt_warmup_if_needed(org=org, mock_org=args.mock_org)
 
-    agent = AgentLoop(org=org, provider=provider, mock_org=args.mock_org)
-
-    mock_label = " [bold yellow][MOCK ORG][/bold yellow]" if args.mock_org else ""
-    console.print(
-        Panel(
-            f"[bold]Salesforce Developer Agent[/bold]{mock_label}\n"
-            f"Org: {org.org_alias} ({org.org_type}) | API: v{org.api_version}\n"
-            f"Provider: {provider.__class__.__name__} | Model: {provider.model_name}\n\n"
-            "Type your request, or 'quit' to exit.",
-            border_style="green",
-        )
-    )
-
     if args.request:
+        # One-shot path — single AgentLoop, exit when the task ends.
+        agent = AgentLoop(org=org, provider=provider, mock_org=args.mock_org)
+        mock_label = " [bold yellow][MOCK ORG][/bold yellow]" if args.mock_org else ""
+        console.print(
+            Panel(
+                f"[bold]Salesforce Developer Agent[/bold]{mock_label}\n"
+                f"Org: {org.org_alias} ({org.org_type}) | API: v{org.api_version}\n"
+                f"Provider: {provider.__class__.__name__} | "
+                f"Model: {provider.model_name}",
+                border_style="green",
+            )
+        )
         agent.run(args.request)
-    else:
-        while True:
-            try:
-                user_input = Prompt.ask("\n[bold green]sf-agent[/bold green]")
-            except (KeyboardInterrupt, EOFError):
-                console.print("\n[dim]Goodbye.[/dim]")
-                break
+        return
 
-            if user_input.strip().lower() in ("quit", "exit", "q"):
-                console.print("[dim]Goodbye.[/dim]")
-                break
+    # Interactive REPL path — `prompt_toolkit`-based persistent session.
+    # Falls back to the simpler one-shot loop if stdin isn't a TTY (e.g.
+    # piped input in CI). See repl.py for the slash-command surface.
+    if not sys.stdin.isatty():
+        console.print(
+            "[bold red]No request given and stdin is not a TTY.[/bold red] "
+            "Pass a request as an argument, or run [cyan]sf-agent[/cyan] "
+            "from an interactive terminal."
+        )
+        sys.exit(1)
 
-            if not user_input.strip():
-                continue
-
-            agent.run(user_input.strip())
+    from sf_dev_agent.repl import launch_repl
+    sys.exit(launch_repl(
+        org=org, provider=provider, mock_org=args.mock_org,
+    ))
 
 
 if __name__ == "__main__":

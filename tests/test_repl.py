@@ -1,0 +1,361 @@
+"""Unit tests for the REPL dispatcher (Phase C.1).
+
+Tests are scoped to `ReplSession._dispatch` and the slash-command
+handlers — we never invoke `prompt_toolkit`'s interactive layer here.
+That input plumbing is library-tested upstream; our job is the
+application logic on top.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from sf_dev_agent.memory import MemoryScope, WorkingMemoryStore
+from sf_dev_agent.models.schemas import OrgConnection, TaskStatus
+from sf_dev_agent.providers.base import LLMProvider, LLMResponse
+from sf_dev_agent.repl import ReplSession, format_status_dict
+from sf_dev_agent.repl_commands import SLASH_COMMANDS, ReplDirective
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+class _StubProvider(LLMProvider):
+    def __init__(self, name: str = "stub", model: str = "stub-1") -> None:
+        self._name = name
+        self._model = model
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    def chat(self, **kwargs: Any) -> LLMResponse:
+        return LLMResponse(text_blocks=["stub answer"], stop_reason="end_turn")
+
+
+@pytest.fixture
+def org() -> OrgConnection:
+    return OrgConnection(
+        tenant_id="local-dev",
+        org_alias="OrgA",
+        org_type="developer",
+        instance_url="https://example.salesforce.com",
+    )
+
+
+@pytest.fixture
+def session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, org: OrgConnection,
+) -> ReplSession:
+    """A ReplSession backed by a tmp working-memory DB."""
+    db = tmp_path / "wm.db"
+    monkeypatch.setattr(
+        "sf_dev_agent.context.default_db_path", lambda: db,
+    )
+    wm = WorkingMemoryStore(db)
+    s = ReplSession(
+        org=org, provider=_StubProvider(),
+        working_memory=wm, mock_org=False,
+    )
+    yield s
+    wm.close()
+
+
+# ---------------------------------------------------------------------------
+# Slash-command registry
+# ---------------------------------------------------------------------------
+
+def test_registry_has_expected_commands() -> None:
+    expected = {
+        "/help", "/quit", "/exit", "/clear", "/status",
+        "/index", "/resume", "/tasks", "/memory",
+        "/mock", "/provider", "/verbose",
+    }
+    assert expected == set(SLASH_COMMANDS.keys())
+
+
+def test_help_table_lists_every_command(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    directive = SLASH_COMMANDS["/help"].handler(session, [])
+    assert directive == ReplDirective.CONTINUE
+    output = capsys.readouterr().out
+    for name in SLASH_COMMANDS:
+        assert name in output
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher routing
+# ---------------------------------------------------------------------------
+
+def test_dispatch_blank_line_continues(session: ReplSession) -> None:
+    assert session._dispatch("") == ReplDirective.CONTINUE
+    assert session._dispatch("   \t  ") == ReplDirective.CONTINUE
+
+
+def test_dispatch_unknown_slash_continues(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    directive = session._dispatch("/nope-not-a-command")
+    assert directive == ReplDirective.CONTINUE
+    assert "Unknown command" in capsys.readouterr().out
+
+
+def test_dispatch_quit_returns_quit(session: ReplSession) -> None:
+    assert session._dispatch("/quit") == ReplDirective.QUIT
+    assert session._dispatch("/exit") == ReplDirective.QUIT
+
+
+def test_dispatch_freeform_runs_agent(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Free-form input creates an AgentLoop and calls .run()."""
+    captured: dict[str, Any] = {}
+
+    class _FakeAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["init"] = kwargs
+
+        def run(self, request: str):
+            captured["run"] = request
+            from sf_dev_agent.models.schemas import Task
+            return Task(
+                task_id="task_synth",
+                tenant_id="local-dev",
+                user_request=request,
+            )
+
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", _FakeAgent)
+    directive = session._dispatch("describe the Account object")
+    assert directive == ReplDirective.CONTINUE
+    assert captured["run"] == "describe the Account object"
+    # mock_org / provider / org all wired through.
+    assert captured["init"]["mock_org"] is False
+    assert captured["init"]["org"] is session.org
+    # task_id tracked for the /quit extract nudge later.
+    assert "task_synth" in session.completed_task_ids
+
+
+def test_dispatch_freeform_handles_agent_exception(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An exception inside agent.run shouldn't kill the REPL."""
+    class _BoomAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def run(self, request: str):
+            raise RuntimeError("simulated agent failure")
+
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", _BoomAgent)
+    directive = session._dispatch("anything")
+    assert directive == ReplDirective.CONTINUE
+    assert "Agent run failed" in capsys.readouterr().out
+
+
+def test_dispatch_freeform_handles_keyboard_interrupt(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ctrl+C mid-agent leaves the REPL running."""
+    class _InterruptAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def run(self, request: str):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", _InterruptAgent)
+    directive = session._dispatch("interrupt me")
+    assert directive == ReplDirective.CONTINUE
+    assert "Interrupted" in capsys.readouterr().out
+
+
+def test_dispatch_slash_handler_exception_kept_in_repl(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A handler that raises shouldn't bring down the REPL."""
+    def boom(s: ReplSession, argv: list[str]) -> ReplDirective:
+        raise RuntimeError("simulated handler failure")
+
+    from sf_dev_agent.repl_commands import SlashCommand
+    monkeypatch.setitem(
+        SLASH_COMMANDS, "/help",
+        SlashCommand(name="/help", summary="boom", handler=boom),
+    )
+    directive = session._dispatch("/help")
+    assert directive == ReplDirective.CONTINUE
+    assert "Error in /help" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# /mock toggle
+# ---------------------------------------------------------------------------
+
+def test_mock_toggle(session: ReplSession) -> None:
+    assert session.mock_org is False
+    session._dispatch("/mock on")
+    assert session.mock_org is True
+    session._dispatch("/mock off")
+    assert session.mock_org is False
+    session._dispatch("/mock toggle")
+    assert session.mock_org is True
+    session._dispatch("/mock")  # no arg → toggle
+    assert session.mock_org is False
+
+
+def test_mock_invalid_arg(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session._dispatch("/mock garbage")
+    assert "Usage" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# /provider switch
+# ---------------------------------------------------------------------------
+
+def test_provider_switch(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    new_provider = _StubProvider(name="alt", model="alt-1")
+    captured: dict[str, Any] = {}
+
+    def fake_create(provider: str, model: str | None = None):
+        captured["provider"] = provider
+        captured["model"] = model
+        return new_provider
+
+    monkeypatch.setattr("sf_dev_agent.providers.create_provider", fake_create)
+    monkeypatch.setattr(
+        "sf_dev_agent.repl_commands.create_provider", fake_create, raising=False,
+    )
+
+    directive = session._dispatch("/provider gemini gemini-2.5-flash")
+    assert directive == ReplDirective.CONTINUE
+    assert session.provider is new_provider
+    assert captured == {"provider": "gemini", "model": "gemini-2.5-flash"}
+
+
+def test_provider_unknown_name_does_not_change(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    original = session.provider
+    session._dispatch("/provider llama")
+    assert session.provider is original
+    assert "Unknown provider" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# /verbose toggle
+# ---------------------------------------------------------------------------
+
+def test_verbose_toggle(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    import logging
+    root = logging.getLogger()
+    original = root.level
+    try:
+        session._dispatch("/verbose on")
+        assert root.level == logging.DEBUG
+        session._dispatch("/verbose off")
+        assert root.level == logging.INFO
+    finally:
+        root.setLevel(original)
+
+
+# ---------------------------------------------------------------------------
+# /tasks
+# ---------------------------------------------------------------------------
+
+def test_tasks_empty(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    directive = session._dispatch("/tasks")
+    assert directive == ReplDirective.CONTINUE
+    assert "No tasks" in capsys.readouterr().out
+
+
+def test_tasks_excludes_terminal_by_default(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scope = MemoryScope(tenant_id="local-dev", org_alias="OrgA")
+
+    # Force distinct timestamps so list_tasks ordering is deterministic.
+    counter = {"n": 0}
+
+    def fake_now_iso() -> str:
+        counter["n"] += 1
+        return f"2026-04-28T00:00:{counter['n']:02d}+00:00"
+
+    monkeypatch.setattr("sf_dev_agent.memory.working._now_iso", fake_now_iso)
+    monkeypatch.setenv("COLUMNS", "200")
+
+    session.working_memory.create_task("task_inflight", scope, "still going")
+    session.working_memory.update_task_status("task_inflight", "planning")
+    session.working_memory.create_task("task_finished", scope, "all done")
+    session.working_memory.set_result(
+        "task_finished", '{"success": true}',
+        status=TaskStatus.COMPLETE.value,
+    )
+
+    capsys.readouterr()  # drain previous output
+    session._dispatch("/tasks")
+    out = capsys.readouterr().out
+    assert "task_inflight" in out
+    assert "task_finished" not in out
+
+    session._dispatch("/tasks --all")
+    out = capsys.readouterr().out
+    assert "task_inflight" in out
+    assert "task_finished" in out
+
+
+# ---------------------------------------------------------------------------
+# Status helpers
+# ---------------------------------------------------------------------------
+
+def test_format_status_dict_keys(session: ReplSession) -> None:
+    status = format_status_dict(session)
+    expected = {
+        "tenant", "org", "provider", "model",
+        "mock_org", "in-flight tasks", "memories", "index",
+    }
+    assert expected.issubset(status.keys())
+    assert status["mock_org"] == "off"
+    assert "OrgA" in status["org"]
+
+
+def test_status_command_renders(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session._dispatch("/status")
+    out = capsys.readouterr().out
+    # Some content checks — table headers + the org alias should appear.
+    assert "Session status" in out
+    assert "OrgA" in out
+
+
+# ---------------------------------------------------------------------------
+# /clear
+# ---------------------------------------------------------------------------
+
+def test_clear_does_not_drop_state(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing the screen must NOT touch persistent state."""
+    session.completed_task_ids.append("task_x")
+    session.mock_org = True
+
+    monkeypatch.setattr("sf_dev_agent.repl_commands.console.clear", lambda: None)
+    session._dispatch("/clear")
+
+    assert session.completed_task_ids == ["task_x"]
+    assert session.mock_org is True
