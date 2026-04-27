@@ -779,6 +779,32 @@ class ToolRegistry:
             executor=self._exec_memory_compact,
         )
 
+        # --- check_index_freshness (read-only freshness probe) -----------
+        self.register(
+            ToolDefinition(
+                name="check_index_freshness",
+                description=(
+                    "Re-check how recently the metadata index was built "
+                    "for the current org and how much of it is embedded. "
+                    "Read-only, pure local SQLite — no Gemini call, no "
+                    "org call. Use this if you suspect the index is "
+                    "stale mid-task and want to confirm before deciding "
+                    "to call build_metadata_index --delta.\n\n"
+                    "Returns: last_built_at (ISO timestamp or null), "
+                    "age_seconds, is_stale (bool), embedding_coverage_pct, "
+                    "components_count, embedded_count, last_run_error, "
+                    "freshness_line (the same one-liner that's pinned in "
+                    "your env block at session start)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                },
+                read_only=True,
+            ),
+            executor=self._exec_check_index_freshness,
+        )
+
         # --- memory_supersede (link old memory -> newer merged memory) ---
         self.register(
             ToolDefinition(
@@ -1700,6 +1726,27 @@ class ToolRegistry:
                 }
                 for r in records
             ],
+        }
+
+    def _exec_check_index_freshness(self) -> dict[str, Any]:
+        """Re-probe `index_runs` + components.embedding for the current org."""
+        from sf_dev_agent.index_freshness import (
+            check_freshness,
+            format_freshness_line,
+        )
+
+        db_path = self._resolve_index_db_path()
+        freshness = check_freshness(db_path, self.org.org_alias)
+        return {
+            "org_alias": freshness.org_alias,
+            "last_built_at": freshness.last_built_at,
+            "age_seconds": freshness.age_seconds,
+            "is_stale": freshness.is_stale,
+            "embedding_coverage_pct": round(freshness.embedding_coverage_pct, 2),
+            "components_count": freshness.components_count,
+            "embedded_count": freshness.embedded_count,
+            "last_run_error": freshness.last_run_error,
+            "freshness_line": format_freshness_line(freshness),
         }
 
     def _exec_memory_compact(

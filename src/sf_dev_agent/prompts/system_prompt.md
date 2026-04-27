@@ -326,7 +326,10 @@ Org Instance URL: {{INSTANCE_URL}}
 API Version: {{API_VERSION}}
 Session Start: {{TIMESTAMP}}
 Agent Model: {{AGENT_MODEL}}
+Index freshness: {{INDEX_FRESHNESS}}
 </env>
+
+If `Index freshness` says NOT BUILT or STALE, call `build_metadata_index` (with `delta=True` for stale, full retrieve for never-built) before relying on `code_search` / `semantic_search` / `sf_dependency_graph` results — those layers query the local index, not the live org. You can also call `check_index_freshness` at any time to re-check.
 
 Connected org permissions and scopes are managed by the platform. The agent has access only to the APIs and metadata that the client's Connected App and Permission Set allow. Do not attempt to escalate privileges or access APIs outside the granted scope.
 

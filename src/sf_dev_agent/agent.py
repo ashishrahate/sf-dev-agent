@@ -12,6 +12,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+from sf_dev_agent.index_freshness import check_freshness, format_freshness_line
 from sf_dev_agent.memory import (
     ConversationLog,
     MemoryScope,
@@ -90,6 +91,16 @@ class AgentLoop:
         self.current_task: Task | None = None
         self.plan_approved = False
 
+        # Compute index-freshness once at construction. The REPL can refresh
+        # the prompt later via /index or by recreating the AgentLoop.
+        try:
+            from sf_dev_agent.context import default_db_path
+            freshness = check_freshness(default_db_path(), org.org_alias)
+            freshness_line = format_freshness_line(freshness)
+        except Exception:
+            logger.exception("Could not compute index freshness; using fallback")
+            freshness_line = "unknown (freshness check failed)"
+
         self.system_prompt = load_system_prompt(
             TENANT_ID=org.tenant_id,
             ORG_ALIAS=org.org_alias,
@@ -98,6 +109,7 @@ class AgentLoop:
             API_VERSION=org.api_version,
             AGENT_MODEL=provider.model_name,
             TIMESTAMP=datetime.now(UTC).isoformat(),
+            INDEX_FRESHNESS=freshness_line,
         )
 
     # ------------------------------------------------------------------

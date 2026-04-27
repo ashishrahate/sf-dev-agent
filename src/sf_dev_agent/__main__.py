@@ -156,6 +156,12 @@ def main() -> None:
         console.print(f"[bold red]{exc}[/bold red]")
         sys.exit(1)
 
+    # Layer A: soft-prompt to warm the context engine on first run for
+    # this org. Skipped automatically in mock-org mode and once the user
+    # has chosen "no-and-stop-asking" for this org.
+    from sf_dev_agent.warmup import prompt_warmup_if_needed
+    prompt_warmup_if_needed(org=org, mock_org=args.mock_org)
+
     agent = AgentLoop(org=org, provider=provider, mock_org=args.mock_org)
 
     mock_label = " [bold yellow][MOCK ORG][/bold yellow]" if args.mock_org else ""
