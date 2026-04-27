@@ -140,3 +140,109 @@ Designed against Claude Code's auto-memory practices but with SQLite + vector re
 - Real-org pressure test of the orchestrator + delta refresh — held until a real client org is available.
 - Standard-object delta (Account, Contact extension fields) — needs an EntityDefinition pivot.
 - ValidationRule / RecordType / ListView delta — generic story, different parser + Tooling object each.
+
+---
+
+## Update — 2026-04-27: Wave 8 (memory tiers) shipped end-to-end
+
+Memory was the last load-bearing piece of the architecture above. As of 2026-04-27, **all three tiers from "Stateful Memory" — working / project / learning — are live on `main`**. The "Current Phase" section above reflects the plan at the start of the wave; this section captures the actual shipped state.
+
+### Shipped in Wave 8
+
+| Slice | Focus | Commit | Tests delta |
+|---|---|---|---|
+| 1 | Project memory + orchestrator 4th source | `38c1764` | +27 |
+| 2a | Working-memory persistence | `c13d188` | +25 |
+| 2b | AWAITING_APPROVAL state + AgentLoop.resume() | `a8d4a43` | +8 |
+| 2c | Decay scoring | `ef53ccf` | +6 |
+| 2d | Compaction + supersede | `85c68d9` | +13 |
+| 3 | Extraction + export + promotion | `2270122` | +39 |
+
+**231 / 231 default tests passing** (was 113 pre-Wave-8). Lint clean on all touched files.
+
+### What the agent now has end-to-end
+
+1. **Project memory** — durable, vector-recalled, scoped per (tenant, org). Surfaced through `retrieve_context` as a 4th source (alongside semantic / literal / knowledge).
+2. **Working memory** — every task's full lifecycle (state + transcript) persisted to SQLite. Resume from any non-terminal status with redisplay where appropriate (`AgentLoop.resume(task_id, ...)`).
+3. **Decay scoring** — fresh + frequently-recalled memories rank higher; stale ones nudged down without ever being deleted (auditability over reclamation).
+4. **Compaction** — automatic detection of similar memories within (scope, type) at cosine ≥ 0.85; agent-proposed merges; supersedes link preserves audit trail.
+5. **Extraction** — end-of-session sweep that catches save-worthy moments the agent missed in-flight. LLM-driven, manual user confirmation, confidence-scored.
+6. **Export** — Markdown round-trip for transparency, backup, git versioning, cross-machine portability.
+7. **Promotion** — manual-curated path from tenant-private project memory to cross-tenant platform knowledge. Tenant-specific-content heuristic gate.
+
+### New CLI surface
+
+```bash
+# Wave 8 added a memory subcommand
+sf-agent memory extract --task-id <id>         # end-of-session capture
+sf-agent memory export   [--type] [--out]      # dump to disk
+sf-agent memory promote  --memory-id <id> --category <cat>
+```
+
+### New module surface
+
+```
+src/sf_dev_agent/
+  memory/
+    store.py            # MemoryStore — project memory (Wave 8 slice 1)
+    working.py          # WorkingMemoryStore — task state + transcript (slice 2a)
+    conversation_log.py # list-shaped wrapper that mirrors append() to disk
+    extraction.py       # MemoryExtractor — LLM-driven end-of-session capture
+    export.py           # MemoryExporter — Markdown round-trip
+    promote.py          # MemoryPromoter — drafts knowledge entries
+  memory_cli.py         # sf-agent memory <verb> dispatch
+```
+
+### Six tools wired through `tools/registry.py`
+
+- `memory_save` (write, plan-approval gated)
+- `memory_recall` (read-only; embeds the query via Gemini, mocked in offline mode)
+- `memory_list` (read-only, pure local SQLite)
+- `memory_compact` (read-only, pure local; pairwise cosine + connected-components BFS)
+- `memory_supersede` (write, plan-approval gated)
+- `retrieve_context` extended with `memory_type` filter (memory_scope auto-set from `OrgConnection`)
+
+### SQLite tables (all in `default_db_path()`)
+
+```
+components               -- metadata index (Wave 1)
+relationships            -- dependency graph (Wave 1+2c)
+index_runs               -- ingestion provenance (Wave 1)
+knowledge_entries        -- bundled platform knowledge (Wave 5)
+memories                 -- project memory (Wave 8 slice 1)
+tasks                    -- working memory (Wave 8 slice 2a)
+conversation_messages    -- working memory transcript (Wave 8 slice 2a)
+```
+
+One open of the DB serves every memory tier the agent uses.
+
+### Architectural choices locked in Wave 8
+
+- Multi-tenant schema (`tenant_id` + `org_alias`) from day one even though runtime is single-tenant. Avoids future migration.
+- Memory recall via the orchestrator, not always-load. Volume problem solved by retrieval, not by capping count.
+- Persistence is best-effort: working-memory writes are wrapped in try/except with `logger.exception` — a SQLite hiccup logs but never drops in-memory data.
+- Decay scoring is multiplicative + clipped: `score = clip(cosine * (1 + decay_factor), 0, 1)`. Cosine dominates; decay nudges by ≤10% (recency penalty) + ≤5% (usage boost).
+- Compaction preserves history: `superseded_by` is a soft tombstone; old rows stay on disk, hidden from `recall`/`list` by default.
+- Promotion has a heuristic gate for tenant-specific content (org alias / instance URL / Salesforce-shaped IDs); soft-blocks unless `--force`, and `--force` inlines the warnings into the draft as a REVIEW comment.
+
+### Reverted design pivots (do not relitigate)
+
+Two design pivots were proposed and reverted during Wave 8. Documented here so they don't get re-opened:
+
+1. **Redis for working memory + per-user SQLite for project memory.** Reverted: "stick to the original plan, we need a working model now, scale later."
+2. **Full Postgres / pgvector migration absorbed into Wave 8.** Analyzed scope (~3 slices, ~100 `db_path` references touched). Reverted same reason. SQLite stays canonical; Postgres is the multi-tenant scale path, not the MVP.
+
+### Where to look next
+
+- **Backlog**: [`docs/ROADMAP.md`](ROADMAP.md) — full backlog by plane, with priority and effort estimates. Includes both architecture gaps (control / execution plane) and concrete UX deliverables (`sf-agent doctor`, `sf-agent resume`, auto-warm context engine, extract nudge, persistent REPL).
+- **Wave 8 design log**: [`docs/sessions/2026-04-27.md`](sessions/2026-04-27.md) — full narrative of the day Wave 8 shipped. Captures the threshold-tuning incident in slice 2d, the JSON-quoting parser extension in slice 3b, and the two reverted design pivots.
+- **Wave 8 design doc (final)**: in the auto-memory store at `~/.claude/projects/.../memory/wave8_memory_design.md` — locked design calls + as-shipped state.
+
+### What's next
+
+Wave 8 closes the memory architecture. Remaining roadmap items, ordered by leverage:
+
+1. **UX wins** — phase B in `ROADMAP.md`: `sf-agent doctor` (prereq check), `sf-agent resume` CLI verb (the resume capability already exists from slice 2b — only the CLI plumbing is missing), auto-warm context engine + staleness check, end-of-session extract nudge.
+2. **Persistent REPL** — phase C in `ROADMAP.md`: `prompt_toolkit`-based terminal session with slash commands. Replaces the basic `Prompt.ask` REPL; absorbs `/resume`, `/extract`, `/refresh-index`, `/status`.
+3. **Real-org pressure test** of the now-4-layer orchestrator (held until org access).
+4. **Production planes** — control + execution. Auth, tenancy, orchestration API, structured audit, billing, containerization, network egress lockdown. These are product/platform work, not agent work; they live in `ROADMAP.md` Part 1.

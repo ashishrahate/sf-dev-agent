@@ -102,6 +102,61 @@ When you ask for something that creates/modifies metadata, the agent:
 
 ---
 
+## Context engine
+
+The agent has a **hybrid context engine** (4 layers) that retrieves relevant code, schema, knowledge, and past memories for every task. Build it once per org and refresh after deploys:
+
+```bash
+# Inside the agent's REPL, or via natural-language request:
+sf-agent "Build the metadata index for the current org"
+sf-agent "Embed the metadata index for semantic search"
+sf-agent "Embed the bundled knowledge base"
+```
+
+The agent invokes these tools (`build_metadata_index`, `embed_metadata_index`, `embed_knowledge_base`) automatically when it judges them necessary. They're idempotent — hash-gated re-embedding skips unchanged rows; `build_metadata_index --delta` re-fetches only what changed against the org's Tooling-API `LastModifiedDate`.
+
+The four layers:
+
+| Layer | What | How retrieved |
+|---|---|---|
+| Metadata index | Org schema, classes, triggers, dependency graph | `code_search`, `sf_dependency_graph` |
+| Vector store | Embedded code chunks (Gemini `gemini-embedding-001`, 3072-d) | `semantic_search` |
+| Knowledge base | 32 bundled SF best-practice / governor-limit / pattern entries | `knowledge_search` |
+| Memory store | Past decisions, preferences, constraints from prior sessions | `memory_recall` |
+
+For open-ended exploration, prefer `retrieve_context` — it fans out to all four layers in one call and returns a deduped, token-budgeted payload.
+
+---
+
+## Memory tier
+
+The agent persists three kinds of state across sessions:
+
+- **Project memory** — durable user / feedback / project / reference rows scoped per (tenant, org). Surfaced via `memory_recall` and the orchestrator. Save manually with `memory_save` or via end-of-session extraction (below).
+- **Working memory** — every task's full conversation transcript and state machine, persisted to SQLite. Lets you resume an interrupted task without losing context.
+- **Learning memory** — manually curated promotion path from project memory to the cross-tenant bundled knowledge base.
+
+### Memory subcommand
+
+```bash
+# Scan a completed task's transcript for save-worthy moments
+sf-agent memory extract --task-id task_20260427120000
+
+# Dump memories to Markdown for git versioning / backup / sharing
+sf-agent memory export [--type feedback] [--out ./memory-snapshots]
+
+# Promote a project memory to a bundled knowledge entry
+sf-agent memory promote \
+    --memory-id local-dev:OrgA:bulkify-trigger:abcd1234 \
+    --category best_practice
+```
+
+`memory extract` walks each LLM-proposed candidate (yes / no / edit) before persisting — no automatic writes. `memory promote` runs a tenant-specific-content heuristic and refuses to write the draft unless `--force`; `--force` still inlines the warnings into the file as a REVIEW comment so they're impossible to miss.
+
+See `docs/PROJECT_SUMMARY.md` "Wave 8 shipped end-to-end" for the full memory architecture.
+
+---
+
 ## Manual configuration (skip the wizard)
 
 If you'd rather edit `.env` by hand, the **minimum** is:
@@ -158,19 +213,38 @@ See `.env.example` for the complete list of optional overrides.
 ```
 sf-dev-agent/
 ├── src/sf_dev_agent/
-│   ├── __main__.py            # CLI entry point + setup dispatcher
-│   ├── setup_wizard.py        # interactive setup flow
-│   ├── agent.py               # ReAct loop, plan-approve-execute state machine
-│   ├── paths.py               # repo_root() / agent_workspace() helpers
-│   ├── sf_config.py           # auto-derive org type / instance URL / API version
-│   ├── providers/             # anthropic / openai / gemini adapters
-│   ├── tools/registry.py      # sf CLI wrappers, file I/O, bash
-│   ├── prompts/               # system prompt template
-│   └── models/schemas.py      # Pydantic models (Task, ExecutionPlan, ...)
-├── workspace/                 # SFDX project — agent reads/writes metadata here
-├── tests/                     # pytest suite
-├── docs/                      # design notes, project summary
-└── .env                       # your config (gitignored)
+│   ├── __main__.py             # CLI entry point + setup / memory dispatchers
+│   ├── setup_wizard.py         # interactive setup flow
+│   ├── agent.py                # ReAct loop, plan-approve-execute, resume()
+│   ├── paths.py                # repo_root() / agent_workspace() helpers
+│   ├── sf_config.py            # auto-derive org type / instance URL / API version
+│   ├── memory_cli.py           # `sf-agent memory <verb>` dispatch
+│   ├── providers/              # anthropic / openai / gemini adapters
+│   ├── tools/registry.py       # sf CLI wrappers, file I/O, bash, context, memory
+│   ├── prompts/                # system prompt template
+│   ├── models/schemas.py       # Pydantic models (Task, ExecutionPlan, ...)
+│   ├── context/                # hybrid context engine — index, vectors, knowledge, orchestrator
+│   │   ├── index.py            # SQLite metadata index
+│   │   ├── orchestrator.py     # retrieve_context — 4-layer fan-out
+│   │   ├── delta.py            # Tooling-API LastModifiedDate diff
+│   │   ├── parsers/            # ApexClass / ApexTrigger / CustomObject parsers
+│   │   ├── embedders/          # Gemini + mock embedder adapters
+│   │   ├── knowledge/          # bundled best-practice / governor-limit entries
+│   │   └── schema.sql          # all SQLite tables (index + memory + working memory)
+│   └── memory/                 # working / project / learning memory tiers
+│       ├── store.py            # MemoryStore — project memory
+│       ├── working.py          # WorkingMemoryStore — task state + transcript
+│       ├── conversation_log.py # list-shaped wrapper that mirrors append() to disk
+│       ├── extraction.py       # MemoryExtractor — LLM-driven end-of-session capture
+│       ├── export.py           # MemoryExporter — Markdown round-trip
+│       └── promote.py          # MemoryPromoter — drafts knowledge entries
+├── workspace/                  # SFDX project — agent reads/writes metadata here
+├── tests/                      # pytest suite (231 default tests)
+├── docs/                       # design notes, project summary, roadmap, session logs
+│   ├── PROJECT_SUMMARY.md      # architecture + as-shipped state
+│   ├── ROADMAP.md              # backlog by plane + UX deliverables
+│   └── sessions/               # per-session design logs
+└── .env                        # your config (gitignored)
 ```
 
 ---
@@ -186,4 +260,11 @@ sf-dev-agent/
 
 ## Roadmap
 
-See [docs/PROJECT_SUMMARY.md](docs/PROJECT_SUMMARY.md) for the multi-week build plan covering metadata indexing, semantic code search, an approval UI, and project memory.
+The hybrid context engine, retrieval orchestrator, and memory tiers (working / project / learning) are all shipping. **Wave 8 closed the memory architecture** as of 2026-04-27 — see `docs/PROJECT_SUMMARY.md` "Wave 8 shipped end-to-end" for the full picture.
+
+The current backlog lives in [`docs/ROADMAP.md`](docs/ROADMAP.md). It's organized in two parts:
+
+- **Part 1 — architecture gaps by plane**: agent (~95%), data (~70%), control (~20%), execution (~5%). Lists every item from the PROJECT_SUMMARY architecture description that isn't yet built, with priority and effort.
+- **Part 2 — UX deliverables**: `sf-agent doctor` (system prereq check), `sf-agent resume` (CLI verb for crash recovery), auto-warm context engine + staleness check, end-of-session extract nudge, persistent terminal REPL with slash commands. Phased so each item is independently shippable.
+
+Per-session design logs are in `docs/sessions/`. The day Wave 8 shipped is captured in `docs/sessions/2026-04-27.md`.
