@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 from sf_dev_agent.index_freshness import check_freshness, format_freshness_line
+from sf_dev_agent.interrupt import InterruptListener
 from sf_dev_agent.memory import (
     ConversationLog,
     MemoryScope,
@@ -370,69 +371,110 @@ class AgentLoop:
         arrive. With `self.streaming=False` (one-shot CLI), deltas are
         buffered and rendered as Markdown at end-of-message — same UX
         as the pre-streaming code path.
+
+        ESC / Ctrl+C: an `InterruptListener` watches stdin in a
+        background thread. The streaming on_text callback polls the
+        flag; when set, it raises `InterruptedError` which we catch
+        alongside `KeyboardInterrupt`. The current iteration is
+        abandoned, a synthetic user message records the interruption
+        for the model's next turn, and the loop exits.
         """
-        for iteration in range(self.max_iterations):
-            logger.info("Agent loop iteration %d (phase=%s)", iteration + 1, phase)
+        with InterruptListener() as interrupt:
+            for iteration in range(self.max_iterations):
+                logger.info("Agent loop iteration %d (phase=%s)", iteration + 1, phase)
 
-            chunks = self.provider.chat_stream(
-                system=self.system_prompt,
-                messages=self.conversation.as_messages(),
-                tools=self.tool_registry.get_tool_definitions(),
-            )
+                try:
+                    chunks = self.provider.chat_stream(
+                        system=self.system_prompt,
+                        messages=self.conversation.as_messages(),
+                        tools=self.tool_registry.get_tool_definitions(),
+                    )
 
-            if self.streaming:
-                # Print each delta to the live terminal as it arrives.
-                # Markdown formatting can't be applied incrementally, so
-                # use raw print here; the user sees tokens stream by.
-                response = consume_stream(
-                    chunks,
-                    on_text=lambda t: console.print(t, end="", soft_wrap=True),
-                )
-                if response.text_blocks:
-                    # Terminate the streaming line cleanly.
-                    console.print()
-            else:
-                response = consume_stream(chunks)
+                    if self.streaming:
+                        # Print each delta to the live terminal as it
+                        # arrives. The on_text callback also acts as
+                        # the interrupt poll-point: if ESC fired, raise
+                        # to abort the stream cleanly.
+                        def on_text(t: str) -> None:
+                            if interrupt.is_set():
+                                raise InterruptedError("ESC pressed")
+                            console.print(t, end="", soft_wrap=True)
+
+                        response = consume_stream(chunks, on_text=on_text)
+                        if response.text_blocks:
+                            # Terminate the streaming line cleanly.
+                            console.print()
+                    else:
+                        response = consume_stream(chunks)
+                        for text in response.text_blocks:
+                            self._display_text(text)
+                except (InterruptedError, KeyboardInterrupt):
+                    self._handle_interrupt(phase)
+                    return
+
+                # Rebuild assistant content blocks in internal format.
+                assistant_content: list[dict[str, Any]] = []
+                tool_calls: list[dict[str, Any]] = []
+
                 for text in response.text_blocks:
-                    self._display_text(text)
+                    assistant_content.append({"type": "text", "text": text})
 
-            # Rebuild assistant content blocks in internal format.
-            assistant_content: list[dict[str, Any]] = []
-            tool_calls: list[dict[str, Any]] = []
+                for tc in response.tool_calls:
+                    assistant_content.append({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.input,
+                    })
+                    tool_calls.append({"id": tc.id, "name": tc.name, "input": tc.input})
 
-            for text in response.text_blocks:
-                assistant_content.append({"type": "text", "text": text})
+                self.conversation.append({"role": "assistant", "content": assistant_content})
 
-            for tc in response.tool_calls:
-                assistant_content.append({
-                    "type": "tool_use",
-                    "id": tc.id,
-                    "name": tc.name,
-                    "input": tc.input,
-                })
-                tool_calls.append({"id": tc.id, "name": tc.name, "input": tc.input})
+                if not tool_calls:
+                    logger.info("Agent completed %s phase (no more tool calls)", phase)
+                    break
 
-            self.conversation.append({"role": "assistant", "content": assistant_content})
+                # Check between LLM stream and tool dispatch — if the
+                # user pressed ESC during the LLM response, don't fire
+                # off the tools they tried to cancel.
+                if interrupt.is_set():
+                    self._handle_interrupt(phase)
+                    return
 
-            if not tool_calls:
-                logger.info("Agent completed %s phase (no more tool calls)", phase)
-                break
+                tool_results = [
+                    self._execute_tool(call["name"], call["input"], call["id"], phase)
+                    for call in tool_calls
+                ]
+                self.conversation.append({"role": "user", "content": tool_results})
 
-            tool_results = [
-                self._execute_tool(call["name"], call["input"], call["id"], phase)
-                for call in tool_calls
-            ]
-            self.conversation.append({"role": "user", "content": tool_results})
+                if response.stop_reason == "end_turn":
+                    logger.info("Agent signaled end_turn in %s phase", phase)
+                    break
 
-            if response.stop_reason == "end_turn":
-                logger.info("Agent signaled end_turn in %s phase", phase)
-                break
+            else:
+                console.print(
+                    f"[bold red]Agent hit max iterations ({self.max_iterations}) "
+                    f"in {phase} phase.[/bold red]"
+                )
 
-        else:
-            console.print(
-                f"[bold red]Agent hit max iterations ({self.max_iterations}) "
-                f"in {phase} phase.[/bold red]"
-            )
+    def _handle_interrupt(self, phase: str) -> None:
+        """Handle an ESC or Ctrl+C during streaming. Records the cancel
+        in the transcript so a follow-up message has the model's last
+        partial output as context, and exits the loop cleanly.
+        """
+        # Add a blank line so the next prompt isn't glued to a partial token.
+        console.print()
+        console.print(
+            f"[yellow]Interrupted during {phase} phase. "
+            "Task state is persisted; the next message can redirect "
+            "or resume.[/yellow]"
+        )
+        self.conversation.append({
+            "role": "user",
+            "content": "<user pressed ESC; the previous agent message "
+                       "was interrupted mid-stream. Acknowledge briefly "
+                       "and wait for the next instruction.>",
+        })
 
     # ------------------------------------------------------------------
     # Tool execution with gating
