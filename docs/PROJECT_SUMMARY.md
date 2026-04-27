@@ -243,6 +243,35 @@ Two design pivots were proposed and reverted during Wave 8. Documented here so t
 Wave 8 closes the memory architecture. Remaining roadmap items, ordered by leverage:
 
 1. **UX wins** — phase B in `ROADMAP.md`: ✅ shipped end-to-end. `sf-agent doctor` (`e67a161`), auto-warm context engine + staleness check (`38f6c19`), `sf-agent resume` CLI verb (`e8d89bb`), and the docs/alias refresh. Single-binary install — no `uv run` prefix needed; `sf-agent` and `sfagent` both work.
-2. **Persistent REPL** — phase C in `ROADMAP.md`: `prompt_toolkit`-based terminal session with slash commands, streaming output, ESC interrupt, resume-by-LLM-intent (3-tool intercepted pattern), extract nudge at `/quit`. Replaces the basic `Prompt.ask` REPL; absorbs `/resume`, `/extract`, `/refresh-index`, `/status`.
+2. **Persistent REPL** — phase C in `ROADMAP.md`: ✅ shipped end-to-end. See "Update — 2026-04-28" section below.
 3. **Real-org pressure test** of the now-4-layer orchestrator (held until org access).
 4. **Production planes** — control + execution. Auth, tenancy, orchestration API, structured audit, billing, containerization, network egress lockdown. These are product/platform work, not agent work; they live in `ROADMAP.md` Part 1.
+
+---
+
+## Update — 2026-04-28: Phase C shipped end-to-end
+
+The persistent REPL — Claude-Code-style terminal session — is fully built. Six independently-shipped slices on `main`:
+
+| Slice | What landed | Commit |
+|---|---|---|
+| C.1 | REPL skeleton + 12 slash commands (`prompt_toolkit`, FileHistory at `~/.sf-agent/history`, WordCompleter, bottom_toolbar status line, dispatcher split from prompt loop for testability) | `b557465` |
+| C.2 | Streaming output: new `chat_stream()` on `LLMProvider` yielding `StreamChunk` discriminated union (`TEXT_DELTA`, `TOOL_USE_START`, `TOOL_USE_DELTA`, `TOOL_USE_END`, `STOP`); real Gemini streaming via `generate_content_stream`; default fallback wraps `chat()` so every other provider gets free pseudo-streaming; agent unified through `chat_stream` + `consume_stream` | `e5e006f` |
+| C.3 | ESC / Ctrl+C interrupt: `InterruptListener` daemon thread polling stdin (`msvcrt` on Windows, `termios` + `select` on POSIX, no-op on non-TTY); streaming `on_text` callback raises `InterruptedError`, caught alongside `KeyboardInterrupt`; second poll-point between LLM stream and tool dispatch so ESC during the response cancels emitted tools; synthetic `<user pressed ESC>` message preserves context | `8974276` |
+| C.4 | Resume-by-LLM-intent via 3 tools: `list_resumable_tasks` + `get_task_summary` (read-only) and `request_resume` (intercepted in `AgentLoop._execute_tool` like `submit_plan`); REPL reads `agent.resume_requested` after `run()` returns and dispatches `AgentLoop.resume(...)` so resumed task lands in one keystroke; `ToolRegistry` now takes optional `WorkingMemoryStore` handle | `1c21092` |
+| C.5 | Extract nudge at `/quit`: soft prompt `[yes / skip / no-and-stop-asking]` walks completed tasks through `MemoryExtractor` candidate-by-candidate; per-(tenant, org) sentinel file (same pattern as B.2 warmup); one-shot CLI runs don't get the nudge | `b06240e` |
+| C.6 | Documentation refresh: ROADMAP / PROJECT_SUMMARY / README updated with as-built notes | this commit |
+
+**Test count: 369 passing** (231 at end of Wave 8 → +138 across phase B + phase C). No regressions across the suite during phase C.
+
+### Architectural choices locked in Phase C
+
+- **Streaming abstraction is provider-agnostic.** `StreamChunk` + `consume_stream` decouple "real streaming" from "fallback pseudo-streaming". Adding real streaming for Anthropic / OpenAI is opt-in — override `chat_stream` in the provider — and doesn't break anything.
+- **Interrupt is poll-based, not signal-based.** Background thread sets a `threading.Event`; the on_text callback polls and raises. Avoids the pitfalls of signal handling on Windows (where SIGINT delivery is patchy) and works in non-TTY environments by no-op'ing.
+- **Resume-by-intent uses an intercepted tool, not a regex classifier.** The LLM does its own intent recognition. Intercepting `request_resume` at the tool-call boundary is the clean cut point because resume requires *replacing* the current `AgentLoop`, which an in-loop tool executor can't do.
+- **Extract nudge is end-of-session, not per-task.** Single soft prompt at `/quit` keeps approval fatigue low. The earlier "per-task extract nudge" idea was dropped in the C.5 design.
+- **REPL dispatcher is split from `prompt_toolkit`.** All routing logic (`_dispatch`, `_dispatch_slash`, `_dispatch_agent`) is testable without touching the interactive layer; `prompt_toolkit` only owns the input line.
+
+### Where to look next (Phase C)
+
+- **Phase C session log**: [`docs/sessions/2026-04-28.md`](sessions/2026-04-28.md) — narrative of the C.3–C.6 work and the design choices behind them.

@@ -362,74 +362,64 @@ Files: `src/sf_dev_agent/resume_cli.py` (~80 LOC), `__main__.py` dispatch, `test
 
 ## Phase C (revised) — ~6-8 days, the persistent REPL
 
-### C.1 — REPL skeleton + 15 slash commands (~3 days)
+**Status:** C.1 ✅ · C.2 ✅ · C.3 ✅ · C.4 ✅ · C.5 ✅ · C.6 ✅ — phase C complete.
 
-`prompt_toolkit>=3.0`. Status line at the bottom. History persisted to `~/.sf-agent/history`. Tab completion on slash commands. Multiline via Shift+Enter or trailing `\`.
+### C.1 ✅ — REPL skeleton + 12 slash commands (~3 days) — `b557465`
 
-v1 slash commands: `/help`, `/quit`, `/exit`, `/clear`, `/status`, `/index`, `/resume`, `/tasks`, `/memory recall`, `/memory list`, `/memory extract`, `/memory export`, `/memory promote`, `/mock`, `/provider`, `/verbose`.
+`prompt_toolkit>=3.0`, history persisted to `~/.sf-agent/history`, tab completion on slash commands, status line at the bottom. Free-form input → `AgentLoop.run()`; lines starting with `/` → slash dispatcher.
 
-Files: `src/sf_dev_agent/repl.py` (~400 LOC), `src/sf_dev_agent/repl_commands.py` (~300 LOC), `tests/test_repl.py`.
+v1 commands shipped: `/help`, `/quit`, `/exit`, `/clear`, `/status`, `/index`, `/resume`, `/tasks`, `/memory`, `/mock`, `/provider`, `/verbose` (12 total — `/memory` is one command with subverbs `recall|list|extract|export|promote`, not five separate slashes).
 
-### C.2 — Streaming output (~2 days)
+Files: `src/sf_dev_agent/repl.py`, `src/sf_dev_agent/repl_commands.py`, `tests/test_repl.py`.
 
-New abstract method `chat_stream()` on `LLMProvider` yielding `StreamChunk` events: `text_delta`, `tool_use_start`, `tool_use_delta`, `tool_use_end`, `message_stop`.
+### C.2 ✅ — Streaming output (~2 days) — `e5e006f`
 
-Provider implementations:
-- Anthropic: `client.messages.stream(...)`.
-- OpenAI: `client.chat.completions.create(stream=True, ...)`.
-- Gemini: `model.generate_content(..., stream=True)`.
+New `chat_stream()` on `LLMProvider` yielding a `StreamChunk` discriminated union (`TEXT_DELTA`, `TOOL_USE_START`, `TOOL_USE_DELTA`, `TOOL_USE_END`, `STOP`). `consume_stream()` helper turns chunks back into a regular `LLMResponse` with an optional `on_text` live-render callback.
 
-REPL renders text deltas via `rich.live.Live`. One-shot CLI mode keeps non-streaming.
+- **Gemini:** real streaming via `generate_content_stream`. Function calls aren't delta-streamed by the API — they're buffered and emitted as `START` + `END` pairs at the tail.
+- **Default fallback** on `LLMProvider` wraps `chat()` so every other provider gets free pseudo-streaming until a real implementation lands.
+- **Agent:** unified through `chat_stream` + `consume_stream`. `streaming=True` (REPL) renders deltas live via `console.print(end="")`; `streaming=False` (one-shot CLI) buffers and renders Markdown at end-of-message — same UX as before.
 
-Files: `providers/base.py`, three provider files, `agent.py` (new `_agent_loop_streaming`), `tests/test_streaming.py`.
+Files: `providers/base.py`, `providers/gemini_provider.py`, `agent.py`, `repl.py`, `tests/test_streaming.py`.
 
-### C.3 — ESC interrupt (~0.5 day, paired with C.2)
+### C.3 ✅ — ESC / Ctrl+C interrupt (~0.5 day) — `8974276`
 
-`prompt_toolkit` key bindings. ESC sets `self._interrupt_requested`; streaming loop checks between chunks; agent emits a synthetic `<user pressed ESC; interrupted>` message into the conversation; control returns to the prompt. In-flight tool calls finish (usually fast).
+`InterruptListener` context manager runs a daemon thread polling stdin for ESC: `msvcrt.kbhit() / getch()` on Windows, `tty.setcbreak() + select.select()` on POSIX. Non-TTY (tests, piped input, CI) is a no-op.
 
-Files: `repl.py` (key binding + flag wiring), `agent.py` (interrupt-aware loop).
+Wired into `_agent_loop`: the streaming `on_text` callback raises `InterruptedError` when the listener flag is set; the loop catches both that and `KeyboardInterrupt` at the same level. A second poll-point sits between the LLM stream and tool dispatch so an interrupt during the model's response cancels the tools it tried to emit. After interrupt, a synthetic `<user pressed ESC>` message lands in the transcript so the next turn has the partial output as context.
 
-### C.4 — Resume-by-intent as an LLM tool call (~1 day)
+Files: `src/sf_dev_agent/interrupt.py`, `agent.py`, `tests/test_interrupt.py`.
 
-**Architecture: three tools, one of them intercepted.** Mirrors the existing `submit_plan` pattern.
+### C.4 ✅ — Resume-by-LLM-intent via 3 tools (~1 day) — `1c21092`
+
+Three tools in the registry; one is intercepted (same pattern as `submit_plan`):
 
 | Tool | Read-only? | Routed to |
 |---|---|---|
-| `list_resumable_tasks()` → list of `{task_id, description, status, age}` for in-flight tasks in scope | yes | normal registry executor |
-| `get_task_summary(task_id)` → `{user_request, status, plan_summary, message_count, last_active}` | yes | normal registry executor |
-| `request_resume(task_id)` → no return; signals the REPL to switch loops | yes | **intercepted by the REPL** before the registry sees it |
+| `list_resumable_tasks()` → in-flight tasks in scope (terminal optional) | yes | normal registry executor |
+| `get_task_summary(task_id)` → status + plan + truncated transcript head | yes | normal registry executor |
+| `request_resume(task_id)` → stamps `agent.resume_requested`, ends loop | yes | **intercepted in `AgentLoop._execute_tool`** |
 
-**Flow when the user types "resume what we were working on" inside the REPL:**
+**Flow:** user types "resume what I was doing" → agent calls `list_resumable_tasks` → optionally `get_task_summary` → confirms with the user → calls `request_resume(task_id)` → agent records the signal and exits the loop after the synthetic confirmation `tool_result` lands in the transcript → `ReplSession._dispatch_agent` reads `agent.resume_requested` and dispatches `AgentLoop.resume(task_id)` so the user lands back in the resumed task in one keystroke.
 
-1. Free-form input goes to `agent.run()` as normal — no pre-flight classifier, no second LLM call.
-2. The agent's planning step sees the input, sees the three resume tools in its tool set, and chooses to call `list_resumable_tasks()`.
-3. Tool returns: `[{id: task_abc, description: "Build a dedup trigger for Account", status: awaiting_approval, age: 12m}, ...]`.
-4. Agent (LLM) reads the result and asks the user naturally: "I see one in-flight task — `task_abc`: 'Build a dedup trigger for Account' (awaiting approval, 12 minutes ago). Resume? [yes/no/show others]".
-5. User: "yes".
-6. Agent calls `request_resume(task_id="task_abc")`.
-7. The REPL intercepts this tool call (same hook as `submit_plan`'s special handling), tears down the current `AgentLoop`, calls `AgentLoop.resume(task_id="task_abc")`, and seamlessly continues the resumed task.
+`request_resume` defensively rejects unknown task_ids and cross-tenant ids; `ToolRegistry` now takes an optional `WorkingMemoryStore` handle so the read-only tools have access without a second SQLite open.
 
-**Why this beats regex:** the LLM does its own intent recognition. No second classifier model, no fragile pattern set. Phrases like "let's pick up where we left off", "continue what I was doing", "resume my deploy task" all work without enumeration.
+Files: `tools/registry.py`, `agent.py`, `repl.py`, `tests/test_resume_by_intent.py`.
 
-**Why this beats a free-running tool call:** the REPL owns the AgentLoop instance lifecycle. `request_resume` can't be a normal tool because resuming requires *replacing* the current loop with a new one — that's not something a tool executor can do from inside the loop it's running in. Intercepting at the tool-call boundary is the clean cut point.
+### C.5 ✅ — Extract nudge at `/quit` (~0.25 day) — `b06240e`
 
-**Description source:** truncated `user_request` (first 80 chars) in v1. Optional v2: `tasks` table gains a `summary` column populated by a fast model at end-of-task.
+`launch_repl` tracks `session.completed_task_ids`. On `/quit` (or `/exit` or Ctrl+D): if any tasks ran, soft-prompt `Run end-of-session memory extraction now? [yes / skip / no-and-stop-asking]`. Yes walks each transcript through `MemoryExtractor`, presents candidates inline (yes/no/edit per candidate), and writes accepted candidates to `MemoryStore` under the current (tenant, org) scope.
 
-Files: `tools/registry.py` (three tools, one with an `intercepted=True` flag), `repl.py` (intercept hook for `request_resume`), `agent.py` (no changes — agent treats them as normal tools), `tests/test_resume_intent.py`.
+Suppression: per-(tenant, org) sentinel file at `<cache>/.skip_extract_<tenant>_<org>` — same shape and pattern as the B.2 warmup nudge for UX consistency. One-shot CLI runs don't get the nudge (they don't go through `launch_repl`).
 
-### C.5 — Extract nudge at `/quit` (~0.25 day)
+Files: `src/sf_dev_agent/extract_nudge.py`, `repl.py`, `tests/test_extract_nudge.py`.
 
-REPL tracks tasks completed during the session. On `/quit` (or `/exit`, or Ctrl+D): if any tasks completed, prompt `Run extraction across all of them? [yes/skip]`. Walks each transcript through `MemoryExtractor`. Suppression via `EXTRACT_NUDGE=off` in `.env`.
+### C.6 ✅ — Documentation refresh (~0.5 day) — this commit
 
-One-shot CLI runs do **not** get the nudge.
-
-Files: `repl.py` (~30 LOC), `tests/test_extract_nudge.py`.
-
-### C.6 — Documentation for the REPL (~0.5 day)
-
-- README: new "Running interactively" section with a transcript.
-- ROADMAP: tick off C items.
-- A short docs page enumerating every slash command.
+- ✅ ROADMAP.md: C.1–C.6 marked shipped with commit hashes.
+- ✅ PROJECT_SUMMARY.md: Phase C section appended with the as-built notes (see B section for format precedent).
+- ✅ README.md: new "Running interactively" section covering the persistent REPL, slash commands, streaming, ESC interrupt, resume-by-intent, and extract nudge.
+- ✅ Session log under `docs/sessions/` for the C.3–C.6 work.
 
 ---
 

@@ -106,6 +106,35 @@ When you ask for something that creates/modifies metadata, the agent:
 
 ---
 
+## Running interactively (the persistent REPL)
+
+`sf-agent` with no arguments launches a persistent terminal session — type freely without a `sf-agent` prefix, hit Enter, and the agent runs. Slash commands manage state.
+
+```text
+$ sf-agent
+╭─ Salesforce Developer Agent ─────────────────────╮
+│ Org: my-prod (production) | API v64.0            │
+│ Provider: GeminiProvider | Model: gemini-2.5-flash │
+│                                                    │
+│ Type freely. /help for commands. /quit to exit.  │
+╰────────────────────────────────────────────────────╯
+❯ what fields does Account have?
+…
+❯ /help
+```
+
+**Slash commands (12):** `/help` · `/status` · `/index` · `/tasks` · `/resume` · `/memory` · `/mock` · `/provider` · `/verbose` · `/clear` · `/quit` · `/exit`. Tab completion is wired up; history persists at `~/.sf-agent/history`. The bottom-line status bar shows the org, provider, in-flight task count, memory count, and index freshness at a glance.
+
+**Streaming output.** Assistant tokens render live as they arrive. Press **ESC** (or **Ctrl+C**) at any time to interrupt mid-stream — the partial output is kept in the transcript so the next message has it as context. ESC during the LLM response also cancels any tool calls the model tried to emit.
+
+**Resume by intent.** Just say what you mean: "what was I working on?" or "resume my last task". The agent calls `list_resumable_tasks` to browse working memory, optionally `get_task_summary` to confirm, then hands control back to the REPL via `request_resume`. The resumed task picks up from its last persisted state — same plan, same approval flag, same transcript — without you typing a second command.
+
+**End-of-session memory extraction.** When you `/quit` after running tasks, the REPL soft-prompts: `Run end-of-session memory extraction now? [yes / skip / no-and-stop-asking]`. Yes walks each transcript through `MemoryExtractor` and lets you confirm each save-worthy candidate. `no-and-stop-asking` suppresses the prompt for that (tenant, org) pair permanently (delete the sentinel file under `.cache/` to re-enable).
+
+`sfagent` (no hyphen) is an alias if you prefer fewer keystrokes — both forms launch the same REPL.
+
+---
+
 ## Subcommand reference
 
 | Command | What it does |
