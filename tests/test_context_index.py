@@ -18,6 +18,10 @@ from sf_dev_agent.context import (
 from sf_dev_agent.context.parsers.apex_class import ApexClassParser
 from sf_dev_agent.context.parsers.apex_trigger import ApexTriggerParser
 from sf_dev_agent.context.parsers.custom_object import CustomObjectParser
+from sf_dev_agent.context.parsers.flow import FlowParser
+from sf_dev_agent.context.parsers.lwc import LWCParser
+from sf_dev_agent.context.parsers.record_type import RecordTypeParser
+from sf_dev_agent.context.parsers.validation_rule import ValidationRuleParser
 from sf_dev_agent.context.retriever import RetrieveResult
 
 
@@ -98,6 +102,75 @@ def fixture_tree(tmp_path: Path) -> Path:
            "  <unique>true</unique>\n"
            "  <externalId>true</externalId>\n"
            "</CustomField>\n")
+
+    # ValidationRule on Account — sibling of fields/.
+    _write(base / "objects" / "Account" / "validationRules" / "Region_Required.validationRule-meta.xml",
+           "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+           "<ValidationRule xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n"
+           "  <fullName>Region_Required</fullName>\n"
+           "  <active>true</active>\n"
+           "  <description>Region must be set on all accounts.</description>\n"
+           "  <errorConditionFormula>ISBLANK(Region__c)</errorConditionFormula>\n"
+           "  <errorDisplayField>Region__c</errorDisplayField>\n"
+           "  <errorMessage>Please specify a region.</errorMessage>\n"
+           "</ValidationRule>\n")
+
+    # RecordType on Account — sibling of validationRules/.
+    _write(base / "objects" / "Account" / "recordTypes" / "Customer.recordType-meta.xml",
+           "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+           "<RecordType xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n"
+           "  <fullName>Customer</fullName>\n"
+           "  <active>true</active>\n"
+           "  <label>Customer</label>\n"
+           "  <description>External customer accounts.</description>\n"
+           "</RecordType>\n")
+
+    # LWC bundle — imports an Apex method and a schema field.
+    _write(base / "lwc" / "accountSummary" / "accountSummary.js-meta.xml",
+           "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+           "<LightningComponentBundle xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n"
+           "  <apiVersion>62.0</apiVersion>\n"
+           "  <isExposed>true</isExposed>\n"
+           "  <masterLabel>Account Summary</masterLabel>\n"
+           "  <description>Renders an account summary panel.</description>\n"
+           "  <targets>\n"
+           "    <target>lightning__RecordPage</target>\n"
+           "    <target>lightning__AppPage</target>\n"
+           "  </targets>\n"
+           "</LightningComponentBundle>\n")
+    _write(base / "lwc" / "accountSummary" / "accountSummary.js",
+           "import { LightningElement, wire } from 'lwc';\n"
+           "import getAccount from '@salesforce/apex/AccountHandler.getAccount';\n"
+           "import REGION_FIELD from '@salesforce/schema/Account.Region__c';\n"
+           "export default class AccountSummary extends LightningElement {\n"
+           "  @wire(getAccount) account;\n"
+           "}\n")
+    _write(base / "lwc" / "accountSummary" / "accountSummary.html",
+           "<template>\n  <p>Account summary</p>\n</template>\n")
+
+    # Flow — record-triggered, calls an Apex invocable, updates Contact.
+    _write(base / "flows" / "Update_Account_Region.flow-meta.xml",
+           "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+           "<Flow xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n"
+           "  <label>Update Account Region</label>\n"
+           "  <processType>RecordTriggerFlow</processType>\n"
+           "  <status>Active</status>\n"
+           "  <interviewLabel>Update Account Region</interviewLabel>\n"
+           "  <start>\n"
+           "    <object>Account</object>\n"
+           "    <recordTriggerType>Update</recordTriggerType>\n"
+           "    <triggerType>RecordAfterSave</triggerType>\n"
+           "  </start>\n"
+           "  <actionCalls>\n"
+           "    <name>Call_Apex</name>\n"
+           "    <actionName>AccountHandler</actionName>\n"
+           "    <actionType>apex</actionType>\n"
+           "  </actionCalls>\n"
+           "  <recordUpdates>\n"
+           "    <name>Touch_Contact</name>\n"
+           "    <object>Contact</object>\n"
+           "  </recordUpdates>\n"
+           "</Flow>\n")
 
     return tmp_path
 
@@ -195,18 +268,213 @@ def test_custom_object_parser_yields_object_and_fields(fixture_tree: Path) -> No
     assert field_of_targets == {"CustomObject:Account"}
 
 
+def test_validation_rule_parser_extracts_attrs_and_emits_validates_on(
+    fixture_tree: Path,
+) -> None:
+    parser = ValidationRuleParser()
+    path = (
+        fixture_tree / "force-app" / "main" / "default"
+        / "objects" / "Account" / "validationRules"
+        / "Region_Required.validationRule-meta.xml"
+    )
+    result = parser.parse(path)
+
+    assert len(result.components) == 1
+    rule = result.components[0]
+    assert rule.component_type == "ValidationRule"
+    assert rule.api_name == "Region_Required"
+    assert rule.id == "ValidationRule:Account.Region_Required"
+    # Top-level component — no parent_id, owning object is in metadata.
+    assert rule.parent_id is None
+    assert rule.metadata["object"] == "Account"
+    assert rule.metadata["active"] is True
+    assert rule.metadata["error_condition_formula"] == "ISBLANK(Region__c)"
+    assert rule.metadata["error_message"] == "Please specify a region."
+    assert rule.metadata["error_display_field"] == "Region__c"
+
+    validates_on = [
+        r for r in result.relationships if r.relationship_type == "VALIDATES_ON"
+    ]
+    assert len(validates_on) == 1
+    assert validates_on[0].source_id == rule.id
+    assert validates_on[0].target_id == "CustomObject:Account"
+
+
+def test_record_type_parser_extracts_attrs_and_emits_record_type_of(
+    fixture_tree: Path,
+) -> None:
+    parser = RecordTypeParser()
+    path = (
+        fixture_tree / "force-app" / "main" / "default"
+        / "objects" / "Account" / "recordTypes"
+        / "Customer.recordType-meta.xml"
+    )
+    result = parser.parse(path)
+
+    assert len(result.components) == 1
+    rec = result.components[0]
+    assert rec.component_type == "RecordType"
+    assert rec.api_name == "Customer"
+    assert rec.id == "RecordType:Account.Customer"
+    assert rec.parent_id is None
+    assert rec.metadata["object"] == "Account"
+    assert rec.metadata["active"] is True
+    assert rec.metadata["label"] == "Customer"
+
+    rt_of = [
+        r for r in result.relationships if r.relationship_type == "RECORD_TYPE_OF"
+    ]
+    assert len(rt_of) == 1
+    assert rt_of[0].source_id == rec.id
+    assert rt_of[0].target_id == "CustomObject:Account"
+
+
+def test_flow_parser_extracts_trigger_apex_and_record_objects(
+    fixture_tree: Path,
+) -> None:
+    parser = FlowParser()
+    path = (
+        fixture_tree / "force-app" / "main" / "default"
+        / "flows" / "Update_Account_Region.flow-meta.xml"
+    )
+    result = parser.parse(path)
+
+    assert len(result.components) == 1
+    flow = result.components[0]
+    assert flow.component_type == "Flow"
+    assert flow.api_name == "Update_Account_Region"
+    assert flow.id == "Flow:Update_Account_Region"
+    assert flow.metadata["process_type"] == "RecordTriggerFlow"
+    assert flow.metadata["status"] == "Active"
+    assert flow.metadata["start_object"] == "Account"
+    assert flow.metadata["record_trigger_type"] == "Update"
+    assert flow.metadata["apex_action_classes"] == ["AccountHandler"]
+    # Contact is touched via recordUpdates; Account is the start_object so it
+    # is captured as TRIGGERS_ON, not duplicated as REFERENCES_OBJECT.
+    assert flow.metadata["record_objects"] == ["Contact"]
+
+    by_type: dict[str, list] = {}
+    for r in result.relationships:
+        by_type.setdefault(r.relationship_type, []).append(r)
+
+    assert len(by_type["TRIGGERS_ON"]) == 1
+    assert by_type["TRIGGERS_ON"][0].target_id == "CustomObject:Account"
+    assert len(by_type["REFERENCES"]) == 1
+    assert by_type["REFERENCES"][0].target_id == "ApexClass:AccountHandler"
+    assert len(by_type["REFERENCES_OBJECT"]) == 1
+    assert by_type["REFERENCES_OBJECT"][0].target_id == "CustomObject:Contact"
+
+
+def test_flow_parser_handles_autolaunched_with_no_start_object(
+    tmp_path: Path,
+) -> None:
+    """Autolaunched flows have no start.object — should still parse cleanly,
+    with no TRIGGERS_ON edge but Apex actions still surfaced."""
+    flow_path = tmp_path / "Reusable_Helper.flow-meta.xml"
+    flow_path.write_text(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<Flow xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n"
+        "  <label>Reusable Helper</label>\n"
+        "  <processType>AutoLaunchedFlow</processType>\n"
+        "  <status>Active</status>\n"
+        "  <actionCalls>\n"
+        "    <name>Util</name>\n"
+        "    <actionName>UtilService</actionName>\n"
+        "    <actionType>apex</actionType>\n"
+        "  </actionCalls>\n"
+        "</Flow>\n",
+        encoding="utf-8",
+    )
+    result = FlowParser().parse(flow_path)
+    assert len(result.components) == 1
+    assert result.components[0].metadata["start_object"] is None
+
+    rel_types = {r.relationship_type for r in result.relationships}
+    assert "TRIGGERS_ON" not in rel_types
+    assert "REFERENCES" in rel_types
+
+
+def test_lwc_parser_extracts_bundle_with_apex_and_schema_imports(
+    fixture_tree: Path,
+) -> None:
+    parser = LWCParser()
+    path = (
+        fixture_tree / "force-app" / "main" / "default"
+        / "lwc" / "accountSummary" / "accountSummary.js-meta.xml"
+    )
+    assert parser.handles(path)
+    result = parser.parse(path)
+
+    assert len(result.components) == 1
+    bundle = result.components[0]
+    assert bundle.component_type == "LightningComponentBundle"
+    assert bundle.api_name == "accountSummary"
+    assert bundle.id == "LightningComponentBundle:accountSummary"
+    assert bundle.metadata["api_version"] == "62.0"
+    assert bundle.metadata["is_exposed"] is True
+    assert bundle.metadata["master_label"] == "Account Summary"
+    assert bundle.metadata["targets"] == [
+        "lightning__RecordPage", "lightning__AppPage",
+    ]
+    assert bundle.metadata["apex_imports"] == ["AccountHandler"]
+    assert bundle.metadata["schema_objects"] == ["Account"]
+    assert bundle.metadata["schema_fields"] == ["Account.Region__c"]
+    assert bundle.metadata["has_html"] is True
+    assert bundle.metadata["has_css"] is False
+
+    apex_refs = [r for r in result.relationships if r.relationship_type == "REFERENCES"]
+    assert {r.target_id for r in apex_refs} == {"ApexClass:AccountHandler"}
+
+    obj_refs = [r for r in result.relationships if r.relationship_type == "REFERENCES_OBJECT"]
+    assert {r.target_id for r in obj_refs} == {"CustomObject:Account"}
+
+
+def test_lwc_parser_rejects_field_meta_xml(tmp_path: Path) -> None:
+    """A *.field-meta.xml file must not be picked up by LWCParser, even though
+    it ends in 'meta.xml' — the bundle-name match guards against that."""
+    field = tmp_path / "Region__c.field-meta.xml"
+    field.write_text("<CustomField/>", encoding="utf-8")
+    assert LWCParser().handles(field) is False
+
+
+def test_validation_rule_parser_handles_orphan_path(tmp_path: Path) -> None:
+    """A misplaced validation rule (not under objects/<X>/validationRules/) still
+    parses; it just emits no VALIDATES_ON edge."""
+    orphan = tmp_path / "Stray.validationRule-meta.xml"
+    orphan.write_text(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<ValidationRule xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n"
+        "  <fullName>Stray</fullName>\n"
+        "  <active>false</active>\n"
+        "  <errorConditionFormula>true</errorConditionFormula>\n"
+        "  <errorMessage>...</errorMessage>\n"
+        "</ValidationRule>\n",
+        encoding="utf-8",
+    )
+    result = ValidationRuleParser().parse(orphan)
+    assert len(result.components) == 1
+    assert result.components[0].metadata["object"] == ""
+    assert result.relationships == []
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator + index integration
 # ---------------------------------------------------------------------------
 
 def test_ingest_directory_indexes_expected_components(built_index) -> None:
     index, result = built_index
-    assert result.components_indexed >= 6  # 3 classes + 2 triggers + 1 object + 2 fields
+    # 3 classes + 2 triggers + 1 object + 2 fields + 1 validation rule
+    # + 1 record type + 1 flow + 1 LWC bundle
+    assert result.components_indexed >= 12
     stats = index.stats()
     assert stats.get("ApexClass") == 3
     assert stats.get("ApexTrigger") == 2
     assert stats.get("CustomObject") == 1
     assert stats.get("CustomField") == 2
+    assert stats.get("ValidationRule") == 1
+    assert stats.get("RecordType") == 1
+    assert stats.get("Flow") == 1
+    assert stats.get("LightningComponentBundle") == 1
 
 
 def test_triggers_on_account_returns_account_trigger(built_index) -> None:
@@ -289,7 +557,9 @@ def test_ingest_is_idempotent(fixture_tree: Path, tmp_path: Path) -> None:
     second = ingest_directory(source_dir=fixture_tree, db_path=db_path)
     with MetadataIndex(db_path) as index:
         assert index.stats() == {
-            "ApexClass": 3, "ApexTrigger": 2, "CustomObject": 1, "CustomField": 2,
+            "ApexClass": 3, "ApexTrigger": 2, "CustomObject": 1,
+            "CustomField": 2, "ValidationRule": 1, "RecordType": 1,
+            "Flow": 1, "LightningComponentBundle": 1,
         }
     # Both runs report the same component count — no duplicates accumulated.
     assert first.components_indexed == second.components_indexed

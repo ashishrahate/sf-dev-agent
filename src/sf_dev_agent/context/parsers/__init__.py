@@ -26,6 +26,10 @@ from sf_dev_agent.context.parsers.base import (
 from sf_dev_agent.context.parsers import apex_class  # noqa: F401
 from sf_dev_agent.context.parsers import apex_trigger  # noqa: F401
 from sf_dev_agent.context.parsers import custom_object  # noqa: F401
+from sf_dev_agent.context.parsers import flow  # noqa: F401
+from sf_dev_agent.context.parsers import lwc  # noqa: F401
+from sf_dev_agent.context.parsers import record_type  # noqa: F401
+from sf_dev_agent.context.parsers import validation_rule  # noqa: F401
 
 __all__ = [
     "ParsedComponent",

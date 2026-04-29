@@ -30,6 +30,15 @@ from sf_dev_agent.models.schemas import (
 )
 from sf_dev_agent.prompts import load_system_prompt
 from sf_dev_agent.providers.base import LLMProvider, consume_stream
+from sf_dev_agent.repl_ui import (
+    render_stream_terminator,
+    render_streaming_text,
+    render_tool_blocked,
+    render_tool_call_header,
+    render_tool_error,
+    render_tool_ok,
+    tool_status,
+)
 from sf_dev_agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -407,12 +416,12 @@ class AgentLoop:
                         def on_text(t: str) -> None:
                             if interrupt.is_set():
                                 raise InterruptedError("ESC pressed")
-                            console.print(t, end="", soft_wrap=True)
+                            render_streaming_text(t)
 
                         response = consume_stream(chunks, on_text=on_text)
                         if response.text_blocks:
                             # Terminate the streaming line cleanly.
-                            console.print()
+                            render_stream_terminator()
                     else:
                         response = consume_stream(chunks)
                         for text in response.text_blocks:
@@ -507,10 +516,7 @@ class AgentLoop:
         phase: str,
     ) -> dict[str, Any]:
         """Execute a tool, enforcing phase-based write gating."""
-        console.print(
-            f"  [dim]Tool call:[/dim] [bold]{tool_name}[/bold] "
-            f"[dim]{json.dumps(tool_input, indent=None)[:200]}[/dim]"
-        )
+        render_tool_call_header(tool_name, tool_input)
 
         # submit_plan is intercepted here — never reaches the registry executor.
         if tool_name == "submit_plan":
@@ -527,7 +533,7 @@ class AgentLoop:
                 f"Tool '{tool_name}' is a write operation and cannot execute "
                 "during planning. Include it as a step in the execution plan."
             )
-            console.print(f"  [bold red]BLOCKED:[/bold red] {msg}")
+            render_tool_blocked(tool_name, msg)
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -537,7 +543,7 @@ class AgentLoop:
 
         if tool_name in WRITE_TOOLS and not self.plan_approved:
             msg = f"Tool '{tool_name}' requires an approved plan before execution."
-            console.print(f"  [bold red]BLOCKED:[/bold red] {msg}")
+            render_tool_blocked(tool_name, msg)
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -546,9 +552,10 @@ class AgentLoop:
             }
 
         try:
-            result = self.tool_registry.execute(tool_name, tool_input)
+            with tool_status(tool_name):
+                result = self.tool_registry.execute(tool_name, tool_input)
             result_str = json.dumps(result) if isinstance(result, dict) else str(result)
-            console.print(f"  [green]OK[/green] [dim]({len(result_str)} chars)[/dim]")
+            render_tool_ok(tool_name, result_str)
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -556,7 +563,7 @@ class AgentLoop:
             }
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
-            console.print(f"  [bold red]ERROR:[/bold red] {error_msg}")
+            render_tool_error(tool_name, error_msg)
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,

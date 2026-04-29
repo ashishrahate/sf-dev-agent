@@ -18,7 +18,7 @@ Status as of 2026-04-27. Roughly: agent plane ~95% done, data plane ~70% (inheri
 | Rollback engine | Must-have for prod | 1 week | Every plan has `rollback_strategy`; nothing executes it on Phase 2 failure. Needed before write tasks against production orgs. |
 | Real Apex AST parser | Nice-to-have | 1-2 weeks | Today: regex extraction of class refs. Real AST would catch more relationships and survive obscure formatting. |
 | Per-method Apex chunking | Nice-to-have | 1 week | Needs usage signal first — current class-level chunking may already be sufficient. |
-| ValidationRule / RecordType / ListView parsers | Nice-to-have | 2-3 days each | Same generic-parser story as ApexClass / CustomObject. Schema doesn't change. |
+| ValidationRule / RecordType / Flow / LWC parsers | ✅ shipped 2026-04-29 | — | All four landed against fixture data on `main`. ValidationRule + RecordType emit `VALIDATES_ON` / `RECORD_TYPE_OF` edges; Flow emits `TRIGGERS_ON` + `REFERENCES` (Apex) + `REFERENCES_OBJECT`; LWC parses bundles and emits Apex import edges. ListView still pending. |
 | Standard-object delta refresh | Nice-to-have | 3 days | Needs an EntityDefinition pivot in the Tooling-API query. |
 | Real-org pressure test of the 4-layer orchestrator | Must-have for prod | 2-3 days | Held until org access. Wave 8 added memory as the 4th source; needs validation against a real org with thousands of components. |
 | Drop the `build_metadata_index` mock-mode shim | Maintenance | 2 hours | Tracked in `memory/todo_index_shim.md`. Either fail-loudly in mock or ship a fixture-populated DB. |
@@ -68,6 +68,7 @@ These are the ones we plan to close in **Part 2**.
 | `sf-agent resume <task-id>` CLI verb | Quick win | 0.5 days | Capability exists (`AgentLoop.resume`); only the CLI plumbing is missing. |
 | End-of-session extraction nudge | Quick win | 0.5 days | Today: user must remember to run `memory extract` themselves. |
 | Persistent terminal REPL with slash commands | High UX | 3-5 days | Replaces the basic `Prompt.ask` REPL with a `prompt_toolkit`-based experience. The unified UI surface. |
+| Claude-Code-style REPL polish (v1) | ✅ shipped 2026-04-29 | — | New `repl_ui.py` module: consistent header/result/error/blocked rendering for tool calls, spinner via `console.status` while tools run, compact key=value input summary. Wired into `agent.py:_execute_tool` + the streaming `on_text` callback. v2 deferred: inline diffs for file edits, collapsible blocks, syntax-highlighted code in results. |
 | Web/desktop UI | Out of scope (CLI-first) | — | Replaced by the persistent REPL. |
 | CI integration / unattended mode | Out of scope (safety model) | — | Mandatory approval gate is by design. CI integration would need signed plans + policy engine, not a `--yes` flag. |
 

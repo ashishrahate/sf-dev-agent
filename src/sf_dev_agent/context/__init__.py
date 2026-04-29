@@ -141,7 +141,11 @@ def default_component_types() -> list[str]:
     StandardObject, ApexTriggerHistory) aren't retrievable but might be
     parseable, and vice versa.
     """
-    return ["ApexClass", "ApexTrigger", "CustomObject"]
+    return [
+        "ApexClass", "ApexTrigger", "CustomObject",
+        "ValidationRule", "RecordType", "Flow",
+        "LightningComponentBundle",
+    ]
 
 
 # ---------------------------------------------------------------------------

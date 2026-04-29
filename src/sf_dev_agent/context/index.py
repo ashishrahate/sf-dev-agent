@@ -221,13 +221,20 @@ class MetadataIndex:
         return [_row_to_component(r) for r in rows]
 
     def triggers_on(self, object_api_name: str) -> list[ComponentRow]:
-        """Return every ApexTrigger registered as TRIGGERS_ON the given object."""
+        """Return every ApexTrigger registered as TRIGGERS_ON the given object.
+
+        Filtered to ApexTrigger specifically — record-triggered Flows also
+        emit a TRIGGERS_ON edge, but for those use the generic relationship
+        API (or a future `flows_on` accessor).
+        """
         target_id = f"CustomObject:{object_api_name}"
         rows = self._conn.execute(
             """
             SELECT c.* FROM components c
             JOIN relationships r ON r.source_id = c.id
-            WHERE r.target_id = ? AND r.relationship_type = 'TRIGGERS_ON'
+            WHERE r.target_id = ?
+              AND r.relationship_type = 'TRIGGERS_ON'
+              AND c.component_type = 'ApexTrigger'
             ORDER BY c.api_name
             """,
             (target_id,),
