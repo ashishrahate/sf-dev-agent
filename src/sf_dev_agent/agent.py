@@ -243,11 +243,21 @@ class AgentLoop:
         scope = MemoryScope(tenant_id=self.org.tenant_id, org_alias=self.org.org_alias)
         if self.working_memory is not None:
             try:
+                # Slice C: persist the mode at task creation so resume()
+                # can faithfully reconstruct it later. Initial status is
+                # PLANNING for plan mode (Phase 1 is about to run) and
+                # EXECUTING for non-plan modes (no Phase 1 happens).
+                initial_status = (
+                    TaskStatus.PLANNING.value
+                    if self.mode == AgentMode.PLAN
+                    else TaskStatus.EXECUTING.value
+                )
                 self.working_memory.create_task(
                     task_id=task_id,
                     scope=scope,
                     user_request=user_request,
-                    status=TaskStatus.PLANNING.value,
+                    status=initial_status,
+                    mode=self.mode.value,
                 )
                 self.conversation = ConversationLog(
                     task_id=task_id, store=self.working_memory,
@@ -316,11 +326,20 @@ class AgentLoop:
                 f"not the current org's tenant {org.tenant_id!r}"
             )
 
+        # Slice C: the persisted row's mode is authoritative. A task
+        # started in plan mode shouldn't suddenly become execution on
+        # resume just because the REPL session changed mode in the
+        # meantime. Caller-supplied `mode` is treated as a fallback for
+        # legacy rows that pre-date the column.
+        try:
+            persisted_mode = AgentMode(row.mode)
+        except (ValueError, AttributeError):
+            persisted_mode = mode
         self = cls(
             org=org, provider=provider,
             max_iterations=max_iterations, mock_org=mock_org,
             working_memory=working_memory,
-            mode=mode, write_allowlist=write_allowlist,
+            mode=persisted_mode, write_allowlist=write_allowlist,
         )
 
         # Reconstruct Task model + plan from persisted state.
@@ -475,7 +494,14 @@ class AgentLoop:
                 "content": "Plan approved. Proceed with execution.",
             })
 
-        console.print("\n[bold cyan]Phase 2: Executing approved plan[/bold cyan]")
+        if self.mode == AgentMode.PLAN:
+            console.print(
+                "\n[bold cyan]Phase 2: Executing approved plan[/bold cyan]"
+            )
+        else:
+            console.print(
+                f"\n[bold cyan]Resuming in {self.mode.value} mode[/bold cyan]"
+            )
         self._agent_loop(phase="execution")
         self._transition(TaskStatus.COMPLETE)
         self._persist_terminal_result(success=True, summary="completed")

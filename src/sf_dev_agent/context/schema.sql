@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     plan_approved   INTEGER NOT NULL DEFAULT 0, -- 0 or 1
     result_json     TEXT,                       -- serialized TaskResult, set on completion
     error           TEXT,                       -- failure detail
+    mode            TEXT NOT NULL DEFAULT 'plan', -- AgentMode enum value (slice C)
     created_at      TEXT NOT NULL,              -- ISO-8601 UTC
     updated_at      TEXT NOT NULL,              -- bumped on every mutation
     completed_at    TEXT                        -- set when status reaches a terminal state

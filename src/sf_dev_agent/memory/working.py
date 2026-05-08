@@ -71,6 +71,7 @@ class TaskRow:
     created_at: str
     updated_at: str
     completed_at: str | None
+    mode: str = "plan"  # AgentMode enum value (slice C); default for older DBs
 
 
 class WorkingMemoryStore:
@@ -88,6 +89,27 @@ class WorkingMemoryStore:
             Path(__file__).resolve().parent.parent / "context" / "schema.sql"
         )
         self._conn.executescript(schema_path.read_text(encoding="utf-8"))
+        self._migrate_add_mode_column()
+
+    def _migrate_add_mode_column(self) -> None:
+        """Slice C migration: add `mode` to existing `tasks` tables.
+
+        `CREATE TABLE IF NOT EXISTS` is no-op when the table already
+        exists, so the new column doesn't land on pre-slice-C DBs via
+        the schema script. Run an ALTER TABLE that's idempotent —
+        SQLite raises `OperationalError: duplicate column name` once
+        the column is in place; we swallow that specific error and
+        let any other (real schema problem) bubble up.
+        """
+        try:
+            self._conn.execute(
+                "ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'plan'"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                return
+            raise
 
     def close(self) -> None:
         self._conn.close()
@@ -108,6 +130,7 @@ class WorkingMemoryStore:
         scope: MemoryScope,
         user_request: str,
         status: str = "planning",
+        mode: str = "plan",
     ) -> TaskRow:
         """Insert a new tasks row. Idempotent on PK collision (returns existing)."""
         if not task_id:
@@ -126,12 +149,12 @@ class WorkingMemoryStore:
             """
             INSERT INTO tasks (
                 id, tenant_id, org_alias, status, user_request,
-                plan_approved, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                plan_approved, mode, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
             (
                 task_id, scope.tenant_id, scope.org_alias, status,
-                user_request, now, now,
+                user_request, mode, now, now,
             ),
         )
         self._conn.commit()
@@ -349,6 +372,10 @@ def _now_iso() -> str:
 
 
 def _row_to_task(row: sqlite3.Row) -> TaskRow:
+    # Defensive default — `mode` may be missing on rows from very old
+    # DBs that somehow skipped the migration. Treat as plan.
+    keys = row.keys() if hasattr(row, "keys") else None
+    mode_val = row["mode"] if keys is None or "mode" in keys else "plan"
     return TaskRow(
         id=row["id"],
         tenant_id=row["tenant_id"],
@@ -362,4 +389,5 @@ def _row_to_task(row: sqlite3.Row) -> TaskRow:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         completed_at=row["completed_at"],
+        mode=mode_val or "plan",
     )
