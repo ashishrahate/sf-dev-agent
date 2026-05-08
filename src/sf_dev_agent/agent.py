@@ -33,6 +33,7 @@ from sf_dev_agent.providers.base import LLMProvider, consume_stream
 from sf_dev_agent.repl_ui import (
     render_stream_terminator,
     render_streaming_text,
+    render_file_write_diff,
     render_tool_blocked,
     render_tool_call_header,
     render_tool_error,
@@ -79,6 +80,31 @@ _TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset({
     TaskStatus.FAILED,
     TaskStatus.ROLLED_BACK,
 })
+
+
+def _capture_file_write_before(tool_input: dict[str, Any]) -> str | None:
+    """Read existing file content for diffing before file_write overwrites.
+
+    Returns "" if the target doesn't exist (new file → diff renders as
+    all additions). Returns None on any error or path-traversal attempt
+    so the diff is skipped silently — the executor's own validation
+    still has the final word on whether the write happens.
+    """
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return None
+    try:
+        from sf_dev_agent.paths import agent_workspace
+        workspace = agent_workspace().resolve()
+        target = (workspace / file_path).resolve()
+        if not str(target).startswith(str(workspace)):
+            return None
+        if not target.exists():
+            return ""
+        return target.read_text(encoding="utf-8")
+    except Exception:
+        logger.exception("Could not capture file_write before-content")
+        return None
 
 
 class AgentLoop:
@@ -551,10 +577,31 @@ class AgentLoop:
                 "is_error": True,
             }
 
+        # v2 slice 1 — capture pre-write content for inline diff rendering.
+        # None means "skip diff" (path traversal, read error). "" means
+        # "new file" — diff renders as all additions.
+        diff_before: str | None = None
+        if tool_name == "file_write":
+            diff_before = _capture_file_write_before(tool_input)
+
         try:
             with tool_status(tool_name):
                 result = self.tool_registry.execute(tool_name, tool_input)
             result_str = json.dumps(result) if isinstance(result, dict) else str(result)
+            if (
+                tool_name == "file_write"
+                and diff_before is not None
+                and isinstance(result, dict)
+                and not result.get("error")
+            ):
+                try:
+                    render_file_write_diff(
+                        str(tool_input.get("file_path", "")),
+                        diff_before,
+                        str(tool_input.get("content", "")),
+                    )
+                except Exception:
+                    logger.exception("Could not render file_write diff")
             render_tool_ok(tool_name, result_str)
             return {
                 "type": "tool_result",
@@ -570,6 +617,7 @@ class AgentLoop:
                 "content": f"ERROR: {error_msg}",
                 "is_error": True,
             }
+
 
     # ------------------------------------------------------------------
     # Plan presentation and approval

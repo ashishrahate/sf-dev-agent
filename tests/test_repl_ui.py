@@ -124,3 +124,72 @@ def test_render_streaming_text_writes_delta(capture) -> None:
     assert "world" in out
     # Terminator pushes a newline so the next prompt starts fresh.
     assert out.endswith("\n")
+
+
+# ---------------------------------------------------------------------------
+# v2 slice 1 — render_file_write_diff
+# ---------------------------------------------------------------------------
+
+def test_render_file_write_diff_new_file_shows_additions(capture) -> None:
+    repl_ui.render_file_write_diff(
+        "src/foo.cls", before="",
+        after="line one\nline two\nline three\n",
+    )
+    out = capture.getvalue()
+    # The unified-diff header lines name the file with (before)/(after) tags.
+    assert "src/foo.cls (before)" in out
+    assert "src/foo.cls (after)" in out
+    # Hunk header is present.
+    assert "@@" in out
+    # All content lines appear with the `+` prefix from unified diff.
+    assert "+line one" in out
+    assert "+line two" in out
+    assert "+line three" in out
+    # No deletion lines for a new file.
+    assert "-line" not in out
+
+
+def test_render_file_write_diff_edit_shows_both_sides(capture) -> None:
+    before = "alpha\nbeta\ngamma\n"
+    after = "alpha\nBETA\ngamma\n"
+    repl_ui.render_file_write_diff("src/foo.cls", before, after)
+    out = capture.getvalue()
+    # Edit produces both a `-` and a `+` line for the changed row.
+    assert "-beta" in out
+    assert "+BETA" in out
+    # Context lines from unified diff are present unprefixed.
+    assert "alpha" in out
+    assert "gamma" in out
+    # Vertical-bar prefix from the renderer for visual nesting.
+    assert "│" in out
+
+
+def test_render_file_write_diff_no_op_skips_render(capture) -> None:
+    """Identical before/after produces no output — caller relies on the OK
+    line to acknowledge the (no-op) write."""
+    repl_ui.render_file_write_diff("src/foo.cls", "same\n", "same\n")
+    assert capture.getvalue() == ""
+
+
+def test_render_file_write_diff_truncates_long_diff(capture) -> None:
+    """Caps output at max_lines so one giant write doesn't flood the screen."""
+    before = ""
+    after = "\n".join(f"line{i}" for i in range(500)) + "\n"
+    repl_ui.render_file_write_diff(
+        "src/big.cls", before=before, after=after, max_lines=20,
+    )
+    out = capture.getvalue()
+    assert "diff truncated at 20 lines" in out
+    # Lines beyond the cap should not appear (line499 is well past the cap).
+    assert "+line499" not in out
+
+
+def test_render_file_write_diff_handles_rich_markup_chars(capture) -> None:
+    """Arbitrary file content with rich-markup-shaped chars (`[red]`, `[/]`)
+    must render literally, not as styling — we use Text, not markup."""
+    before = ""
+    after = "x = [red]not a tag[/red]\n"
+    repl_ui.render_file_write_diff("src/foo.cls", before, after)
+    out = capture.getvalue()
+    # The literal bracketed text appears in the output.
+    assert "[red]not a tag[/red]" in out

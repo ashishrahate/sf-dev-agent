@@ -10,19 +10,21 @@ agent loop doesn't sprinkle ad-hoc `console.print` calls. Goals:
 - Compact input summaries that read better than `json.dumps(...)[:200]`
   and don't blow up on multiline values (a pasted Apex blob, for instance).
 
-v2 — deferred until v1 lands and we have signal on what's missing:
-- Inline diffs for file-mutating tools (need a tool-classification table).
-- Collapsible tool blocks via rich `Group`/`Tree` rendering.
-- Syntax highlighting for code-shaped tool results.
+v2 — landing in slices:
+- Slice 1 ✅ Inline diffs for `file_write` (this module's `render_file_write_diff`).
+- Slice 2 (deferred): syntax highlighting for code-shaped tool results.
+- Slice 3 (deferred): collapsible / expandable tool blocks via tool_use_id capture.
 """
 
 from __future__ import annotations
 
 import contextlib
+import difflib
 import json
 from typing import Any, Iterator
 
 from rich.console import Console
+from rich.text import Text
 
 # A single shared console keeps spinner state coherent. Tests can substitute
 # a Console pointed at a StringIO via `set_console_for_tests`.
@@ -141,6 +143,62 @@ def tool_status(tool_name: str) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# Inline diff for file_write (v2 slice 1)
+# ---------------------------------------------------------------------------
+
+def render_file_write_diff(
+    file_path: str, before: str, after: str, max_lines: int = 200,
+) -> None:
+    """Print a colored unified diff between header and footer of a tool block.
+
+    Skipped silently when content is unchanged so a no-op write doesn't
+    print an empty diff. Each diff line is prefixed with `│ ` for visual
+    nesting under the v1 `┌`/`└` block. Built with `rich.text.Text` so
+    arbitrary file content can't smuggle in rich markup.
+
+    Truncates to `max_lines` to keep one giant write from filling the
+    screen — the LLM still sees the full result via the executor's return.
+    """
+    if before == after:
+        return
+
+    diff_lines = list(difflib.unified_diff(
+        before.splitlines(),
+        after.splitlines(),
+        fromfile=f"{file_path} (before)",
+        tofile=f"{file_path} (after)",
+        lineterm="",
+    ))
+    if not diff_lines:
+        return
+
+    truncated = False
+    if len(diff_lines) > max_lines:
+        diff_lines = diff_lines[:max_lines]
+        truncated = True
+
+    for line in diff_lines:
+        prefix = Text("│ ", style="cyan")
+        if line.startswith("---") or line.startswith("+++"):
+            body = Text(line, style="dim")
+        elif line.startswith("@@"):
+            body = Text(line, style="magenta")
+        elif line.startswith("+") and not line.startswith("+++"):
+            body = Text(line, style="green")
+        elif line.startswith("-") and not line.startswith("---"):
+            body = Text(line, style="red")
+        else:
+            body = Text(line, style="dim")
+        _console.print(prefix + body)
+
+    if truncated:
+        _console.print(
+            Text("│ ", style="cyan")
+            + Text(f"… diff truncated at {max_lines} lines", style="dim italic")
+        )
+
+
+# ---------------------------------------------------------------------------
 # Streaming-text helpers
 # ---------------------------------------------------------------------------
 
@@ -159,6 +217,7 @@ def render_stream_terminator() -> None:
 __all__ = [
     "format_tool_input_summary",
     "get_console",
+    "render_file_write_diff",
     "render_streaming_text",
     "render_stream_terminator",
     "render_tool_blocked",
