@@ -10,6 +10,32 @@ from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
+# Operating mode — chosen at task start, fixed for that task's lifetime
+# ---------------------------------------------------------------------------
+
+class AgentMode(str, Enum):
+    """How the agent gates write operations.
+
+    PLAN (default) — current behavior. Agent submits a structured plan via
+        `submit_plan`; user approves; writes execute as bulk-pre-approved.
+        Best for production-touching work.
+
+    EXECUTION — autonomous. No plan ceremony, no per-write approval gate.
+        The user has explicitly authorized direct execution for the
+        session. Best for trusted scratch/dev work.
+
+    GENERAL — read-only by default with per-write inline approval. The
+        agent prefers read tools; if it needs a write, the user is
+        prompted (yes/no/always-this-tool/cancel) before it runs. Best
+        for Q&A / exploration where occasional consented writes are OK.
+    """
+
+    PLAN = "plan"
+    EXECUTION = "execution"
+    GENERAL = "general"
+
+
+# ---------------------------------------------------------------------------
 # Task state machine
 # ---------------------------------------------------------------------------
 

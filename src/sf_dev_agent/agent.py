@@ -20,6 +20,7 @@ from sf_dev_agent.memory import (
     WorkingMemoryStore,
 )
 from sf_dev_agent.models.schemas import (
+    AgentMode,
     ExecutionPlan,
     OrgConnection,
     PlanStep,
@@ -82,6 +83,50 @@ _TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset({
 })
 
 
+# Per-mode guidance injected into the system prompt. The plan-mode block is
+# empty so the existing prompt body (Operating Modes / Phase 1 / Phase 2 /
+# Plan Format sections) speaks for itself — backwards-compatible default.
+# Execution and general modes get a loud override at the top so the LLM
+# knows to skip submit_plan and adapt its behavior.
+_MODE_INSTRUCTIONS: dict[AgentMode, str] = {
+    AgentMode.PLAN: "",
+    AgentMode.EXECUTION: (
+        "**MODE OVERRIDE — EXECUTION MODE.** The user has switched into "
+        "execution mode. Do NOT call `submit_plan`. Skip the planning "
+        "ceremony entirely. Execute the user's request directly using "
+        "whichever tools are appropriate. The user has explicitly "
+        "authorized writes without per-step approval for this session. "
+        "The 'Operating Modes / Phase 1 / Phase 2 / Plan Format' "
+        "guidance below DOES NOT APPLY in this mode — only the "
+        "universal Salesforce Platform Expertise rules above do. Be "
+        "concise; act decisively."
+    ),
+    AgentMode.GENERAL: (
+        "**MODE OVERRIDE — GENERAL MODE.** The user has switched into "
+        "general (read-only-default) mode. Do NOT call `submit_plan`. "
+        "Default to read-only tools. If a write tool is genuinely "
+        "required, call it directly — the user will be prompted to "
+        "approve each call inline before it runs (the prompt is "
+        "outside your view). Make tool inputs as small and scoped as "
+        "possible since the user reviews each one. The 'Operating "
+        "Modes / Phase 1 / Phase 2 / Plan Format' guidance below DOES "
+        "NOT APPLY in this mode — only the universal Salesforce "
+        "Platform Expertise rules above do. Prefer answering directly "
+        "from retrieved context when the user is asking a question."
+    ),
+}
+
+
+def _mode_instructions(mode: AgentMode) -> str:
+    """Return the system-prompt override block for a given mode.
+
+    Defensive: unknown mode returns the plan-mode (empty) block rather
+    than raising — preserves agent function if someone hand-rolls a
+    new enum value without updating this map.
+    """
+    return _MODE_INSTRUCTIONS.get(mode, "")
+
+
 def _capture_file_write_before(tool_input: dict[str, Any]) -> str | None:
     """Read existing file content for diffing before file_write overwrites.
 
@@ -118,6 +163,8 @@ class AgentLoop:
         mock_org: bool = False,
         working_memory: WorkingMemoryStore | None = None,
         streaming: bool = False,
+        mode: AgentMode = AgentMode.PLAN,
+        write_allowlist: set[str] | None = None,
     ) -> None:
         self.org = org
         self.provider = provider
@@ -131,6 +178,18 @@ class AgentLoop:
         # the buffered Markdown render. Both go through chat_stream
         # under the hood; the flag only changes presentation.
         self.streaming = streaming
+        # Operating mode — fixed at construction so a mid-task switch
+        # can't change the safety contract. The REPL applies new modes
+        # to subsequent tasks only.
+        self.mode = mode
+        # Per-tool allowlist for general-mode "always" approvals. When
+        # the caller passes a set in, modifications persist across the
+        # AgentLoop's lifetime AND across other AgentLoops sharing the
+        # same set (REPL passes session.write_allowlist for per-session
+        # persistence; tests + one-shot CLI get a fresh per-loop set).
+        self._write_allowlist: set[str] = (
+            write_allowlist if write_allowlist is not None else set()
+        )
         # Initialized for real in run() once the task_id is known. Until
         # then we use a placeholder ConversationLog with no store so the
         # type stays consistent and providers can still iterate it.
@@ -161,6 +220,7 @@ class AgentLoop:
             AGENT_MODEL=provider.model_name,
             TIMESTAMP=datetime.now(UTC).isoformat(),
             INDEX_FRESHNESS=freshness_line,
+            AGENT_MODE_INSTRUCTIONS=_mode_instructions(mode),
         )
 
     # ------------------------------------------------------------------
@@ -200,13 +260,22 @@ class AgentLoop:
         else:
             self.conversation = ConversationLog(task_id=task_id)
 
-        self._transition(TaskStatus.PLANNING)
+        # Initial transition reflects the mode. Plan mode goes through
+        # PLANNING → AWAITING_APPROVAL → EXECUTING. Execution + general
+        # skip planning and head straight to EXECUTING — keeps the
+        # status machine honest about what's actually happening.
+        if self.mode == AgentMode.PLAN:
+            self._transition(TaskStatus.PLANNING)
+        else:
+            self._transition(TaskStatus.EXECUTING)
 
         self.conversation.append({"role": "user", "content": user_request})
 
         console.print(Panel(user_request, title="[bold]Task Request", border_style="blue"))
 
-        return self._run_planning_then_execution()
+        if self.mode == AgentMode.PLAN:
+            return self._run_planning_then_execution()
+        return self._run_direct()
 
     @classmethod
     def resume(
@@ -217,6 +286,8 @@ class AgentLoop:
         working_memory: WorkingMemoryStore,
         max_iterations: int = 50,
         mock_org: bool = False,
+        mode: AgentMode = AgentMode.PLAN,
+        write_allowlist: set[str] | None = None,
     ) -> Task:
         """Pick up a persisted task and continue from its last status.
 
@@ -249,6 +320,7 @@ class AgentLoop:
             org=org, provider=provider,
             max_iterations=max_iterations, mock_org=mock_org,
             working_memory=working_memory,
+            mode=mode, write_allowlist=write_allowlist,
         )
 
         # Reconstruct Task model + plan from persisted state.
@@ -365,6 +437,28 @@ class AgentLoop:
 
         return self._run_execution_only(append_transition_message=True)
 
+    def _run_direct(self) -> Task:
+        """Single-phase loop for execution + general modes.
+
+        No plan ceremony; the agent runs straight against the user's
+        request. Write gating is handled per-tool in `_execute_tool`:
+        execution mode passes writes through unconditionally; general
+        mode prompts the user inline before each write.
+        """
+        if self.current_task is None:
+            raise RuntimeError("AgentLoop._run_direct called with no current_task")
+
+        mode_label = self.mode.value
+        console.print(
+            f"\n[bold cyan]Running in {mode_label} mode[/bold cyan]"
+        )
+        self._agent_loop(phase="execution")
+        # Don't override an interrupt-driven FAILED status with COMPLETE.
+        if self.current_task.status not in _TERMINAL_TASK_STATUSES:
+            self._transition(TaskStatus.COMPLETE)
+            self._persist_terminal_result(success=True, summary="completed")
+        return self.current_task
+
     def _run_execution_only(self, *, append_transition_message: bool) -> Task:
         """Phase 2. Assumes a plan is approved and the conversation has the
         transition message already (resume from EXECUTING) or that we should
@@ -431,7 +525,7 @@ class AgentLoop:
                     chunks = self.provider.chat_stream(
                         system=self.system_prompt,
                         messages=self.conversation.as_messages(),
-                        tools=self.tool_registry.get_tool_definitions(),
+                        tools=self._mode_filtered_tool_definitions(),
                     )
 
                     if self.streaming:
@@ -485,10 +579,18 @@ class AgentLoop:
                     self._handle_interrupt(phase)
                     return
 
-                tool_results = [
-                    self._execute_tool(call["name"], call["input"], call["id"], phase)
-                    for call in tool_calls
-                ]
+                # Wrap tool dispatch in the same interrupt handler — a
+                # KeyboardInterrupt from a general-mode inline-approval
+                # `cancel` (or Ctrl+C at that prompt) needs the same
+                # transcript-recording exit path as ESC during streaming.
+                try:
+                    tool_results = [
+                        self._execute_tool(call["name"], call["input"], call["id"], phase)
+                        for call in tool_calls
+                    ]
+                except (InterruptedError, KeyboardInterrupt):
+                    self._handle_interrupt(phase)
+                    return
                 self.conversation.append({"role": "user", "content": tool_results})
 
                 # Resume hand-off: if the LLM called request_resume, end
@@ -545,7 +647,24 @@ class AgentLoop:
         render_tool_call_header(tool_name, tool_input)
 
         # submit_plan is intercepted here — never reaches the registry executor.
+        # In non-plan modes we still intercept it (defensive: stale context
+        # may cause the LLM to call it anyway) and return a clarifying
+        # tool_result so the loop doesn't crash and the LLM can self-correct.
         if tool_name == "submit_plan":
+            if self.mode != AgentMode.PLAN:
+                msg = (
+                    f"submit_plan is not used in {self.mode.value} mode — "
+                    "skip the planning ceremony and proceed directly with "
+                    "the request. See the MODE OVERRIDE block at the top "
+                    "of your system prompt."
+                )
+                render_tool_blocked(tool_name, msg)
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": f"ERROR: {msg}",
+                    "is_error": True,
+                }
             return self._handle_submit_plan(tool_input, tool_use_id)
 
         # request_resume is also intercepted: record the signal, return a
@@ -554,28 +673,53 @@ class AgentLoop:
         if tool_name == "request_resume":
             return self._handle_request_resume(tool_input, tool_use_id)
 
-        if tool_name in WRITE_TOOLS and phase == "planning":
-            msg = (
-                f"Tool '{tool_name}' is a write operation and cannot execute "
-                "during planning. Include it as a step in the execution plan."
-            )
-            render_tool_blocked(tool_name, msg)
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": f"ERROR: {msg}",
-                "is_error": True,
-            }
+        # ----------------------------------------------------------------
+        # Mode-aware write gating. Plan mode keeps today's two-stage gate
+        # (no writes during planning, no writes without plan approval).
+        # Execution mode passes writes through unconditionally. General
+        # mode prompts the user inline per write.
+        # ----------------------------------------------------------------
 
-        if tool_name in WRITE_TOOLS and not self.plan_approved:
-            msg = f"Tool '{tool_name}' requires an approved plan before execution."
-            render_tool_blocked(tool_name, msg)
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": f"ERROR: {msg}",
-                "is_error": True,
-            }
+        if tool_name in WRITE_TOOLS and self.mode == AgentMode.PLAN:
+            if phase == "planning":
+                msg = (
+                    f"Tool '{tool_name}' is a write operation and cannot execute "
+                    "during planning. Include it as a step in the execution plan."
+                )
+                render_tool_blocked(tool_name, msg)
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": f"ERROR: {msg}",
+                    "is_error": True,
+                }
+            if not self.plan_approved:
+                msg = f"Tool '{tool_name}' requires an approved plan before execution."
+                render_tool_blocked(tool_name, msg)
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": f"ERROR: {msg}",
+                    "is_error": True,
+                }
+
+        if tool_name in WRITE_TOOLS and self.mode == AgentMode.GENERAL:
+            approved = self._request_inline_write_approval(tool_name, tool_input)
+            if not approved:
+                msg = (
+                    f"User declined the inline approval for '{tool_name}'. "
+                    "Suggest an alternative read-only approach or ask the "
+                    "user what they would like instead."
+                )
+                render_tool_blocked(tool_name, msg)
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": f"ERROR: {msg}",
+                    "is_error": True,
+                }
+
+        # Execution mode: writes pass through with no gate.
 
         # v2 slice 1 — capture pre-write content for inline diff rendering.
         # None means "skip diff" (path traversal, read error). "" means
@@ -617,6 +761,92 @@ class AgentLoop:
                 "content": f"ERROR: {error_msg}",
                 "is_error": True,
             }
+
+    def _mode_filtered_tool_definitions(self) -> list[dict[str, Any]]:
+        """Tool defs the LLM sees, with submit_plan hidden in non-plan modes.
+
+        Plan mode keeps the full registry. Execution + general modes drop
+        `submit_plan` so the LLM doesn't try to call a tool that's no-op
+        for them. The defensive intercept in `_execute_tool` still handles
+        the case where stale context causes a call to slip through.
+        """
+        defs = self.tool_registry.get_tool_definitions()
+        if self.mode == AgentMode.PLAN:
+            return defs
+        return [d for d in defs if d.get("name") != "submit_plan"]
+
+    def _request_inline_write_approval(
+        self, tool_name: str, tool_input: dict[str, Any]
+    ) -> bool:
+        """Per-write approval prompt for general mode.
+
+        Choices:
+          yes      — approve this single call
+          no       — deny this single call (default)
+          always   — approve this tool name for the rest of this allowlist's
+                     scope. Per-task by default; per-session when the REPL
+                     passes a shared set in via `write_allowlist=`.
+          cancel   — deny + abort the agent loop (raises KeyboardInterrupt
+                     so the existing handler records the cancel and exits
+                     the iteration cleanly).
+
+        Safety defaults:
+          - Non-TTY input → auto-deny. CI / piped-input runs must never
+            silently write; the user gave up no consent in that case.
+          - Default choice is `no`. Hitting Enter means safety, not write.
+          - Ctrl+C / Ctrl+D at the prompt → KeyboardInterrupt (treated
+            like `cancel` so the loop unwinds through the existing
+            interrupt handler instead of swallowing the signal).
+        """
+        import sys
+
+        if tool_name in self._write_allowlist:
+            console.print(
+                f"  [dim]auto-approved (allowlist): {tool_name}[/dim]"
+            )
+            return True
+
+        if not sys.stdin.isatty():
+            logger.warning(
+                "general-mode inline approval auto-denied (non-TTY input): %s",
+                tool_name,
+            )
+            return False
+
+        # Surface what's about to run so the user can decide on the body,
+        # not just the tool name.
+        from sf_dev_agent.repl_ui import format_tool_input_summary
+        summary = format_tool_input_summary(tool_input)
+        console.print(Panel(
+            f"[bold]Tool:[/bold] [cyan]{tool_name}[/cyan]\n"
+            f"[bold]Input:[/bold] [dim]{summary}[/dim]",
+            title="[bold yellow]Write approval requested[/bold yellow]",
+            border_style="yellow",
+        ))
+
+        try:
+            choice = Prompt.ask(
+                "[bold yellow]Allow this write?[/bold yellow]",
+                choices=["yes", "no", "always", "cancel"],
+                default="no",
+            )
+        except (EOFError, KeyboardInterrupt):
+            raise KeyboardInterrupt(
+                "user cancelled at general-mode inline approval"
+            ) from None
+
+        if choice == "always":
+            self._write_allowlist.add(tool_name)
+            console.print(
+                f"  [green]allowlisted[/green] [cyan]{tool_name}[/cyan] "
+                "for this session"
+            )
+            return True
+        if choice == "cancel":
+            raise KeyboardInterrupt(
+                "user cancelled at general-mode inline approval"
+            )
+        return choice == "yes"
 
 
     # ------------------------------------------------------------------
