@@ -16,7 +16,12 @@ import pytest
 from sf_dev_agent.memory import MemoryScope, WorkingMemoryStore
 from sf_dev_agent.models.schemas import OrgConnection, TaskStatus
 from sf_dev_agent.providers.base import LLMProvider, LLMResponse
-from sf_dev_agent.repl import ReplSession, format_status_dict
+from sf_dev_agent.repl import (
+    ReplSession,
+    _print_alert_if_needed,
+    _print_banner,
+    format_status_dict,
+)
 from sf_dev_agent.repl_commands import SLASH_COMMANDS, ReplDirective
 
 # ---------------------------------------------------------------------------
@@ -359,3 +364,92 @@ def test_clear_does_not_drop_state(
 
     assert session.completed_task_ids == ["task_x"]
     assert session.mock_org is True
+
+
+# ---------------------------------------------------------------------------
+# Banner — Solution A (engine state inline)
+# ---------------------------------------------------------------------------
+
+def test_banner_includes_engine_state(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The startup banner now exposes Memory / Tasks / Index counts so the
+    user sees engine state on first paint, not just in the bottom toolbar.
+    """
+    monkeypatch.setenv("COLUMNS", "200")
+    _print_banner(session)
+    out = capsys.readouterr().out
+    assert "Memory:" in out
+    assert "Tasks:" in out
+    assert "Index:" in out
+    # Fresh tmp DB → no index runs → freshness reads "not built".
+    assert "not built" in out
+
+
+# ---------------------------------------------------------------------------
+# Alert — Solution B (conditional heads-up panel)
+# ---------------------------------------------------------------------------
+
+def test_alert_fires_when_index_not_built(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Empty index_runs table → loud yellow banner."""
+    monkeypatch.setenv("COLUMNS", "200")
+    _print_alert_if_needed(session)
+    out = capsys.readouterr().out
+    assert "heads up" in out
+    assert "Index not built" in out
+
+
+def test_alert_fires_when_in_flight_tasks_exist(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A task left in a non-terminal state → alert mentions resume."""
+    monkeypatch.setenv("COLUMNS", "200")
+    scope = MemoryScope(tenant_id="local-dev", org_alias="OrgA")
+    session.working_memory.create_task("task_pending_xyz", scope, "draft")
+    session.working_memory.update_task_status("task_pending_xyz", "planning")
+
+    _print_alert_if_needed(session)
+    out = capsys.readouterr().out
+    assert "heads up" in out
+    assert "in-flight" in out
+    # Task ID is truncated to 8 chars in the preview.
+    assert "task_pen" in out
+    assert "/resume" in out
+
+
+def test_alert_silent_when_index_fresh_and_no_tasks(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Healthy state — no alert printed at all."""
+    import sqlite3
+    from datetime import UTC, datetime
+
+    # Seed a recent successful run so check_freshness reads "fresh".
+    # Use the canonical schema from context/schema.sql via MetadataIndex.
+    from sf_dev_agent.context import MetadataIndex
+    db = tmp_path / "wm.db"
+    MetadataIndex(db).close()  # runs schema.sql, creates index_runs
+
+    conn = sqlite3.connect(str(db))
+    try:
+        now = datetime.now(UTC).isoformat()
+        conn.execute(
+            "INSERT INTO index_runs (org_alias, started_at, completed_at, "
+            "component_types, components_count, error) VALUES (?, ?, ?, ?, ?, ?)",
+            ("OrgA", now, now, "[]", 0, None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("COLUMNS", "200")
+    _print_alert_if_needed(session)
+    out = capsys.readouterr().out
+    # No yellow alert panel — the function returned early.
+    assert "heads up" not in out

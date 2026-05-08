@@ -288,19 +288,96 @@ def _build_prompt_session(session: ReplSession) -> PromptSession:
 def _print_banner(session: ReplSession) -> None:
     org = session.org
     mock_label = " [bold yellow][MOCK ORG][/bold yellow]" if session.mock_org else ""
+
+    # Solution A: pull engine state into the banner so memory / task /
+    # index counts are visible at first paint, not just in the bottom
+    # toolbar (which a small-window user can miss).
+    s = format_status_dict(session)
+    index_str = s["index"]
+    if index_str == "not built":
+        index_render = "[bold red]not built[/bold red]"
+    elif index_str.startswith("STALE"):
+        index_render = f"[bold yellow]{index_str}[/bold yellow]"
+    elif index_str == "—":
+        index_render = "[dim]—[/dim]"
+    else:
+        index_render = f"[green]{index_str}[/green]"
+
     console.print(
         Panel(
             f"[bold]Salesforce Developer Agent[/bold]{mock_label}\n"
             f"Org: {org.org_alias} ({org.org_type}) | "
             f"API v{org.api_version}\n"
             f"Provider: {session.provider.__class__.__name__} | "
-            f"Model: {session.provider.model_name}\n\n"
+            f"Model: {session.provider.model_name}\n"
+            f"Memory: {s['memories']} | "
+            f"Tasks: {s['in-flight tasks']} in-flight | "
+            f"Index: {index_render}\n\n"
             "Type freely to send to the agent. "
             "[cyan]/help[/cyan] lists slash commands. "
             "[cyan]/quit[/cyan] to exit.",
             border_style="green",
         )
     )
+
+
+def _print_alert_if_needed(session: ReplSession) -> None:
+    """Solution B — yellow heads-up panel above the banner when something
+    actionable is true (index stale or never built, in-flight tasks
+    waiting to be resumed). Quiet on healthy sessions.
+    """
+    issues: list[str] = []
+
+    try:
+        from sf_dev_agent.context import default_db_path
+        f = check_freshness(default_db_path(), session.org.org_alias)
+        if f.last_built_at is None:
+            issues.append(
+                "[bold]Index not built[/bold] for this org — retrieval "
+                "layers will return empty until you accept the warm-up "
+                "prompt or call [cyan]build_metadata_index[/cyan]."
+            )
+        elif f.is_stale:
+            issues.append(
+                f"[bold]Index is stale[/bold] "
+                f"({format_age_human(f.age_seconds)}) — run "
+                "[cyan]build_metadata_index[/cyan] for fresh retrieval."
+            )
+    except Exception:
+        logger.exception("alert: freshness probe failed")
+
+    try:
+        if session.working_memory is not None:
+            from sf_dev_agent.memory import TERMINAL_STATUSES
+            scope = MemoryScope(
+                tenant_id=session.org.tenant_id,
+                org_alias=session.org.org_alias,
+            )
+            tasks = session.working_memory.list_tasks(scope=scope, limit=50)
+            in_flight = [t for t in tasks if t.status not in TERMINAL_STATUSES]
+            if in_flight:
+                preview = ", ".join(t.id[:8] for t in in_flight[:3])
+                more = (
+                    f" +{len(in_flight) - 3} more"
+                    if len(in_flight) > 3 else ""
+                )
+                issues.append(
+                    f"[bold]{len(in_flight)} task(s) in-flight[/bold] "
+                    f"({preview}{more}) — [cyan]/resume <id>[/cyan] "
+                    "or [cyan]/resume --latest[/cyan] to pick up."
+                )
+    except Exception:
+        logger.exception("alert: in-flight task probe failed")
+
+    if not issues:
+        return
+
+    body = "\n".join(f"  • {msg}" for msg in issues)
+    console.print(Panel(
+        body,
+        title="[bold yellow]heads up[/bold yellow]",
+        border_style="yellow",
+    ))
 
 
 def launch_repl(
@@ -322,6 +399,7 @@ def launch_repl(
         working_memory=working_memory, mock_org=mock_org,
     )
 
+    _print_alert_if_needed(session)
     _print_banner(session)
     pt_session = _build_prompt_session(session)
 
