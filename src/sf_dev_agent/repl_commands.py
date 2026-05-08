@@ -233,6 +233,37 @@ def cmd_provider(session: ReplSession, argv: list[str]) -> ReplDirective:
     return ReplDirective.CONTINUE
 
 
+def cmd_mode(session: ReplSession, argv: list[str]) -> ReplDirective:
+    """Show or set the operating mode. /mode | /mode plan|execution|general.
+
+    Equivalent to the Shift+Tab keybinding for users who prefer typing.
+    No-op + usage line on invalid arg. The new mode applies to NEXT
+    task — current/resumed tasks honor their own persisted mode.
+    """
+    from sf_dev_agent.models.schemas import AgentMode
+    from sf_dev_agent.repl import format_mode_label
+
+    if not argv:
+        console.print(
+            f"current mode: {format_mode_label(session.mode)} "
+            f"[dim](Shift+Tab to cycle, or /mode <plan|execution|general>)[/dim]"
+        )
+        return ReplDirective.CONTINUE
+
+    arg = argv[0].lower()
+    valid = {m.value for m in AgentMode}
+    if arg not in valid:
+        console.print(
+            f"[red]Unknown mode:[/red] {arg}. "
+            f"[yellow]Usage:[/yellow] /mode <{ '|'.join(sorted(valid)) }>"
+        )
+        return ReplDirective.CONTINUE
+
+    session.mode = AgentMode(arg)
+    console.print(f"mode set to {format_mode_label(session.mode)}")
+    return ReplDirective.CONTINUE
+
+
 def cmd_verbose(session: ReplSession, argv: list[str]) -> ReplDirective:
     """Toggle DEBUG-level logging. /verbose on|off|toggle (default toggle)."""
     root = logging.getLogger()
@@ -316,6 +347,11 @@ _DEFINITIONS: list[SlashCommand] = [
         name="/verbose",
         summary="Toggle DEBUG-level logging. /verbose on|off|toggle.",
         handler=cmd_verbose,
+    ),
+    SlashCommand(
+        name="/mode",
+        summary="Show or set operating mode. /mode | /mode plan|execution|general.",
+        handler=cmd_mode,
     ),
 ]
 

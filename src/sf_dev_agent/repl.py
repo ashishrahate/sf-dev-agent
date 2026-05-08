@@ -30,8 +30,11 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Prompt
 
 from sf_dev_agent.agent import AgentLoop
 from sf_dev_agent.index_freshness import (
@@ -43,7 +46,7 @@ from sf_dev_agent.memory import (
     MemoryStore,
     WorkingMemoryStore,
 )
-from sf_dev_agent.models.schemas import OrgConnection
+from sf_dev_agent.models.schemas import AgentMode, OrgConnection
 from sf_dev_agent.providers.base import LLMProvider
 from sf_dev_agent.repl_commands import (
     SLASH_COMMANDS,
@@ -73,11 +76,21 @@ class ReplSession:
         provider: LLMProvider,
         working_memory: WorkingMemoryStore | None = None,
         mock_org: bool = False,
+        mode: AgentMode = AgentMode.PLAN,
     ) -> None:
         self.org = org
         self.provider = provider
         self.working_memory = working_memory
         self.mock_org = mock_org
+        # Operating mode applies to NEXT task; mid-task changes are
+        # impossible by construction (slash commands + Shift+Tab only
+        # fire at the prompt, when no task is running). Resumed tasks
+        # honor their persisted mode (slice C) and don't read this.
+        self.mode = mode
+        # Per-session "always allow this tool" allowlist for general
+        # mode. Threads into every AgentLoop spawned this session so
+        # the user only re-grants on a fresh REPL launch.
+        self.write_allowlist: set[str] = set()
         # Track tasks completed during this REPL session — used by C.5
         # for the /quit extract nudge.
         self.completed_task_ids: list[str] = []
@@ -125,12 +138,19 @@ class ReplSession:
     def _dispatch_agent(self, line: str) -> ReplDirective:
         """Run the agent against `line` as a fresh task.
 
+        Pre-dispatch hook: if the user is in execution or general mode
+        AND the input looks like a code-change ask, soft-prompt to
+        switch to plan mode. Slice B autosuggest. The session mode is
+        then captured AFTER the prompt, so a `y` flips it before the
+        AgentLoop is constructed.
+
         After the run completes, check `agent.resume_requested` — if the
         LLM called `request_resume(task_id)` mid-run, hand off to
         `AgentLoop.resume(task_id)` so the user lands back in the
-        resumed task without typing a second command. This implements
-        the C.4 resume-by-intent flow.
+        resumed task without typing a second command (C.4).
         """
+        maybe_autosuggest_plan_mode(self, line)
+
         try:
             agent = AgentLoop(
                 org=self.org,
@@ -138,6 +158,8 @@ class ReplSession:
                 mock_org=self.mock_org,
                 working_memory=self.working_memory,
                 streaming=True,
+                mode=self.mode,
+                write_allowlist=self.write_allowlist,
             )
             task = agent.run(line)
             if task is not None:
@@ -156,12 +178,16 @@ class ReplSession:
                         "[red]Cannot resume — REPL has no working memory store.[/red]"
                     )
                     break
+                # Slice C: resume reads mode from the task row, so we
+                # don't pass session.mode here. The allowlist persists
+                # across the session regardless.
                 resumed = AgentLoop.resume(
                     task_id=target_task_id,
                     org=self.org,
                     provider=self.provider,
                     working_memory=self.working_memory,
                     mock_org=self.mock_org,
+                    write_allowlist=self.write_allowlist,
                 )
                 if resumed is not None:
                     self.completed_task_ids.append(resumed.task_id)
@@ -182,6 +208,121 @@ class ReplSession:
                 "Re-run with [cyan]/verbose on[/cyan] for details."
             )
         return ReplDirective.CONTINUE
+
+
+# ---------------------------------------------------------------------------
+# Mode cycling, rendering, and autosuggest — slice B helpers
+# ---------------------------------------------------------------------------
+
+# Order matters: Shift+Tab cycles through this sequence head-to-tail.
+# User-chosen order: general → plan → execution → general. Reasoning:
+# starting from a "safe" general-mode launch, one press unlocks plan
+# mode (still gated by approval), a second press unlocks execution
+# (autonomous). Wrapping back to general lets you bail back to the
+# safest mode with one more press.
+_MODE_CYCLE: tuple[AgentMode, ...] = (
+    AgentMode.GENERAL,
+    AgentMode.PLAN,
+    AgentMode.EXECUTION,
+)
+
+
+def cycle_mode(current: AgentMode) -> AgentMode:
+    """Return the next mode in the Shift+Tab cycle.
+
+    Defensive: if `current` isn't in the cycle (impossible today, but
+    cheap insurance against future enum additions), fall back to PLAN.
+    """
+    try:
+        idx = _MODE_CYCLE.index(current)
+    except ValueError:
+        return AgentMode.PLAN
+    return _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
+
+
+# Color per mode for the bottom toolbar + banner. Plan is green
+# (safest default), general is yellow (read-only with prompts —
+# attention-getting but fine), execution is red (autonomous writes —
+# loud).
+_MODE_COLOR: dict[AgentMode, str] = {
+    AgentMode.PLAN: "green",
+    AgentMode.GENERAL: "yellow",
+    AgentMode.EXECUTION: "red",
+}
+
+
+def format_mode_label(mode: AgentMode) -> str:
+    """Color-coded mode label for terminal display (rich markup)."""
+    color = _MODE_COLOR.get(mode, "white")
+    return f"[bold {color}]{mode.value}[/bold {color}]"
+
+
+# Keywords that strongly suggest a code-change task. Flagged in
+# autosuggest when the user is in non-plan mode.
+_CODE_CHANGE_KEYWORDS: frozenset[str] = frozenset({
+    "create", "write", "update", "modify", "delete", "remove", "rename",
+    "deploy", "fix", "implement", "build", "add", "change", "refactor",
+    "patch", "edit", "generate", "scaffold",
+})
+
+
+def looks_like_code_change(user_input: str) -> bool:
+    """Heuristic — does this free-form prompt likely require writes?
+
+    Splits on whitespace and checks if any token (lowercased, stripped
+    of punctuation) hits the code-change keyword set. Aims for high
+    recall over precision: false positives just trigger an extra
+    suggestion the user can dismiss with `n`.
+    """
+    if not user_input:
+        return False
+    for token in user_input.lower().split():
+        cleaned = token.strip(".,!?:;\"'()[]{}")
+        if cleaned in _CODE_CHANGE_KEYWORDS:
+            return True
+    return False
+
+
+def maybe_autosuggest_plan_mode(session: ReplSession, user_input: str) -> None:
+    """Soft prompt that nudges the user toward plan mode for code changes.
+
+    Fires only when:
+      - Current mode is execution or general (plan mode is already safe).
+      - Input looks like a code-change ask (keyword heuristic).
+      - stdin is a TTY (don't pollute scripted/CI runs).
+
+    No-op on `n` / Enter; flips `session.mode = PLAN` on `y`.
+    """
+    import sys
+
+    if session.mode == AgentMode.PLAN:
+        return
+    if not looks_like_code_change(user_input):
+        return
+    if not sys.stdin.isatty():
+        return
+
+    console.print(Panel(
+        f"This looks like a code-change task. You're currently in "
+        f"{format_mode_label(session.mode)} mode — switching to "
+        f"{format_mode_label(AgentMode.PLAN)} mode adds a plan-and-"
+        "approve gate before any write executes.",
+        title="[bold cyan]heads up[/bold cyan]",
+        border_style="cyan",
+    ))
+    try:
+        choice = Prompt.ask(
+            "[bold]Switch to plan mode for this task?[/bold]",
+            choices=["y", "n"],
+            default="n",
+        )
+    except (EOFError, KeyboardInterrupt):
+        return
+    if choice == "y":
+        session.mode = AgentMode.PLAN
+        console.print(
+            f"  switched to {format_mode_label(AgentMode.PLAN)} mode"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +376,7 @@ def format_status_dict(session: ReplSession) -> dict[str, str]:
         "provider": session.provider.__class__.__name__,
         "model": session.provider.model_name,
         "mock_org": "on" if session.mock_org else "off",
+        "mode": session.mode.value,
         "in-flight tasks": in_flight_count,
         "memories": mem_count,
         "index": freshness,
@@ -242,9 +384,16 @@ def format_status_dict(session: ReplSession) -> dict[str, str]:
 
 
 def _format_bottom_toolbar(session: ReplSession) -> str:
-    """One-line status pinned at the bottom of the terminal."""
+    """One-line status pinned at the bottom of the terminal.
+
+    Mode is the first field so it's the easiest thing to spot when
+    Shift+Tab cycles. Plain text — prompt_toolkit's bottom_toolbar
+    doesn't render rich markup, but the mode word is short and
+    distinct enough to be readable without color.
+    """
     s = format_status_dict(session)
     pieces = [
+        f"mode={s['mode']}",
         f"org={s['org']}",
         f"provider={s['provider'].lower().replace('provider', '')}",
         f"mem={s['memories']}",
@@ -268,13 +417,33 @@ def _history_path() -> Path:
 
 
 def _build_prompt_session(session: ReplSession) -> PromptSession:
-    """Wire prompt_toolkit with history + slash-command completion + status line."""
+    """Wire prompt_toolkit with history + slash-command completion + status line.
+
+    Shift+Tab (Keys.BackTab) cycles the operating mode in place. The
+    binding mutates `session.mode` and invalidates the prompt_toolkit
+    application so the bottom toolbar repaints immediately. Buffer
+    contents are preserved — pressing the chord while typing doesn't
+    swallow your input.
+    """
     completer = WordCompleter(
         sorted(SLASH_COMMANDS.keys()),
         ignore_case=True,
         match_middle=False,
         sentence=True,  # only complete when input starts with the trigger
     )
+
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.BackTab)
+    def _cycle_mode_handler(event) -> None:  # pragma: no cover - prompt_toolkit interactive
+        session.mode = cycle_mode(session.mode)
+        # Force a redraw so the bottom toolbar picks up the new mode
+        # without waiting for the next character.
+        try:
+            event.app.invalidate()
+        except Exception:
+            logger.exception("Shift+Tab redraw invalidate failed")
+
     return PromptSession(
         message="❯ ",
         history=FileHistory(str(_history_path())),
@@ -282,6 +451,7 @@ def _build_prompt_session(session: ReplSession) -> PromptSession:
         complete_while_typing=False,
         bottom_toolbar=lambda: _format_bottom_toolbar(session),
         multiline=False,
+        key_bindings=bindings,
     )
 
 
@@ -310,6 +480,8 @@ def _print_banner(session: ReplSession) -> None:
             f"API v{org.api_version}\n"
             f"Provider: {session.provider.__class__.__name__} | "
             f"Model: {session.provider.model_name}\n"
+            f"Mode: {format_mode_label(session.mode)} "
+            "[dim](Shift+Tab cycles)[/dim]\n"
             f"Memory: {s['memories']} | "
             f"Tasks: {s['in-flight tasks']} in-flight | "
             f"Index: {index_render}\n\n"
@@ -449,6 +621,10 @@ def launch_repl(
 
 __all__ = [
     "ReplSession",
+    "cycle_mode",
+    "format_mode_label",
     "format_status_dict",
     "launch_repl",
+    "looks_like_code_change",
+    "maybe_autosuggest_plan_mode",
 ]

@@ -77,7 +77,7 @@ def test_registry_has_expected_commands() -> None:
     expected = {
         "/help", "/quit", "/exit", "/clear", "/status",
         "/index", "/resume", "/tasks", "/memory",
-        "/mock", "/provider", "/verbose",
+        "/mock", "/provider", "/verbose", "/mode",
     }
     assert expected == set(SLASH_COMMANDS.keys())
 
@@ -453,3 +453,204 @@ def test_alert_silent_when_index_fresh_and_no_tasks(
     out = capsys.readouterr().out
     # No yellow alert panel — the function returned early.
     assert "heads up" not in out
+
+
+# ---------------------------------------------------------------------------
+# Slice B — operating modes in the REPL
+# ---------------------------------------------------------------------------
+
+def test_session_defaults_to_plan_mode(session: ReplSession) -> None:
+    """Backwards compat — existing call sites that don't pass mode= get plan."""
+    from sf_dev_agent.models.schemas import AgentMode
+    assert session.mode == AgentMode.PLAN
+    assert session.write_allowlist == set()
+
+
+def test_cycle_mode_order_is_general_plan_execution() -> None:
+    """User-chosen order: general → plan → execution → general."""
+    from sf_dev_agent.models.schemas import AgentMode
+    from sf_dev_agent.repl import cycle_mode
+
+    assert cycle_mode(AgentMode.GENERAL) == AgentMode.PLAN
+    assert cycle_mode(AgentMode.PLAN) == AgentMode.EXECUTION
+    assert cycle_mode(AgentMode.EXECUTION) == AgentMode.GENERAL
+
+
+def test_format_mode_label_uses_color_per_mode() -> None:
+    """Plan green, general yellow, execution red — colors land in markup."""
+    from sf_dev_agent.models.schemas import AgentMode
+    from sf_dev_agent.repl import format_mode_label
+
+    assert "green" in format_mode_label(AgentMode.PLAN)
+    assert "yellow" in format_mode_label(AgentMode.GENERAL)
+    assert "red" in format_mode_label(AgentMode.EXECUTION)
+
+
+def test_format_status_dict_includes_mode(session: ReplSession) -> None:
+    s = format_status_dict(session)
+    assert "mode" in s
+    assert s["mode"] == "plan"
+
+
+def test_bottom_toolbar_shows_mode(session: ReplSession) -> None:
+    from sf_dev_agent.models.schemas import AgentMode
+    from sf_dev_agent.repl import _format_bottom_toolbar
+
+    session.mode = AgentMode.GENERAL
+    line = _format_bottom_toolbar(session)
+    assert "mode=general" in line
+
+
+def test_banner_shows_mode(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from sf_dev_agent.models.schemas import AgentMode
+
+    session.mode = AgentMode.EXECUTION
+    monkeypatch.setenv("COLUMNS", "200")
+    _print_banner(session)
+    out = capsys.readouterr().out
+    assert "Mode:" in out
+    assert "execution" in out
+    assert "Shift+Tab" in out
+
+
+# ---------------------------------------------------------------------------
+# Slice B — /mode slash command
+# ---------------------------------------------------------------------------
+
+def test_mode_command_shows_current_when_no_arg(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session._dispatch("/mode")
+    out = capsys.readouterr().out
+    assert "current mode" in out
+    assert "plan" in out
+
+
+def test_mode_command_sets_valid_mode(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from sf_dev_agent.models.schemas import AgentMode
+
+    session._dispatch("/mode general")
+    assert session.mode == AgentMode.GENERAL
+    out = capsys.readouterr().out
+    assert "mode set to" in out
+    assert "general" in out
+
+
+def test_mode_command_rejects_invalid(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from sf_dev_agent.models.schemas import AgentMode
+
+    original = session.mode
+    session._dispatch("/mode bogus")
+    out = capsys.readouterr().out
+    assert "Unknown mode" in out
+    assert session.mode == original  # unchanged
+
+
+def test_mode_command_each_value_round_trips(session: ReplSession) -> None:
+    """All three values are accepted by /mode."""
+    from sf_dev_agent.models.schemas import AgentMode
+
+    for m in AgentMode:
+        session._dispatch(f"/mode {m.value}")
+        assert session.mode == m
+
+
+# ---------------------------------------------------------------------------
+# Slice B — autosuggest on code-change keywords
+# ---------------------------------------------------------------------------
+
+def test_looks_like_code_change_detects_keywords() -> None:
+    from sf_dev_agent.repl import looks_like_code_change
+
+    assert looks_like_code_change("create a trigger on Account")
+    assert looks_like_code_change("Please write the test class")
+    assert looks_like_code_change("deploy to sandbox")
+    assert looks_like_code_change("FIX the bug in AccountService")  # case-insensitive
+    assert looks_like_code_change("refactor.")  # trailing punctuation handled
+
+
+def test_looks_like_code_change_ignores_pure_questions() -> None:
+    from sf_dev_agent.repl import looks_like_code_change
+
+    assert not looks_like_code_change("what is Apex?")
+    assert not looks_like_code_change("show me the validation rules")
+    assert not looks_like_code_change("")
+    assert not looks_like_code_change("how do governor limits work")
+
+
+def test_autosuggest_no_op_in_plan_mode(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Plan mode is already safe — no nudge needed."""
+    from sf_dev_agent.repl import maybe_autosuggest_plan_mode
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    # Even with a write-shaped ask, plan mode should stay quiet.
+    maybe_autosuggest_plan_mode(session, "create a trigger")
+    assert "heads up" not in capsys.readouterr().out
+
+
+def test_autosuggest_no_op_for_pure_question(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Read-shaped asks shouldn't trigger the nudge even in non-plan mode."""
+    from sf_dev_agent.models.schemas import AgentMode
+    from sf_dev_agent.repl import maybe_autosuggest_plan_mode
+
+    session.mode = AgentMode.GENERAL
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    maybe_autosuggest_plan_mode(session, "what objects do we have?")
+    assert "heads up" not in capsys.readouterr().out
+
+
+def test_autosuggest_no_op_when_non_tty(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Don't pollute scripted/CI runs with the nudge."""
+    from sf_dev_agent.models.schemas import AgentMode
+    from sf_dev_agent.repl import maybe_autosuggest_plan_mode
+
+    session.mode = AgentMode.EXECUTION
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    maybe_autosuggest_plan_mode(session, "create a trigger")
+    assert "heads up" not in capsys.readouterr().out
+
+
+def test_autosuggest_flips_mode_on_yes(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """User picks 'y' → session.mode flips to PLAN."""
+    from sf_dev_agent.models.schemas import AgentMode
+    from sf_dev_agent.repl import maybe_autosuggest_plan_mode
+
+    session.mode = AgentMode.GENERAL
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sf_dev_agent.repl.Prompt.ask", lambda *a, **k: "y")
+    maybe_autosuggest_plan_mode(session, "create a trigger on Account")
+    assert session.mode == AgentMode.PLAN
+
+
+def test_autosuggest_keeps_mode_on_no(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default 'n' (or explicit) → mode unchanged."""
+    from sf_dev_agent.models.schemas import AgentMode
+    from sf_dev_agent.repl import maybe_autosuggest_plan_mode
+
+    session.mode = AgentMode.EXECUTION
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sf_dev_agent.repl.Prompt.ask", lambda *a, **k: "n")
+    maybe_autosuggest_plan_mode(session, "deploy to sandbox")
+    assert session.mode == AgentMode.EXECUTION
