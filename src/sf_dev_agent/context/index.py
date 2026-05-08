@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 import numpy as np
 
@@ -400,6 +400,57 @@ class MetadataIndex:
         self._conn.commit()
         return cur.rowcount or 0
 
+    def delete_outgoing_relationships(self, component_ids: Iterable[str]) -> int:
+        """Wipe `relationships` rows where `source_id ∈ component_ids`.
+
+        Used by `reindex_from_parse_result` to clear stale edges before
+        re-upserting from a fresh parse. The schema's
+        UNIQUE(source_id, target_id, relationship_type) constraint means
+        a naïve re-insert silently dedupes — but stale edges (those the
+        new parse no longer emits) would persist. Wiping them ensures
+        the post-reindex edge set matches the parser's current output
+        exactly.
+        """
+        ids = list(component_ids)
+        if not ids:
+            return 0
+        placeholders = ",".join(["?"] * len(ids))
+        cur = self._conn.execute(
+            f"DELETE FROM relationships WHERE source_id IN ({placeholders})",
+            tuple(ids),
+        )
+        self._conn.commit()
+        return cur.rowcount or 0
+
+    def reindex_from_parse_result(
+        self, result: ParseResult,
+    ) -> tuple[int, int]:
+        """Apply one parser's output to the index incrementally.
+
+        Two-step write so re-parses don't accumulate stale edges:
+          1. Delete every outgoing relationship for the components in
+             `result` (per `delete_outgoing_relationships`).
+          2. Upsert each component, then upsert each relationship.
+
+        Returns (components_upserted, relationships_upserted). The
+        relationships count reflects only edges whose endpoints both
+        exist in the index — dangling edges silently skip per the
+        existing `upsert_relationship` contract.
+        """
+        component_ids = [c.id for c in result.components]
+        if component_ids:
+            self.delete_outgoing_relationships(component_ids)
+        n_comp = 0
+        for comp in result.components:
+            self.upsert_component(comp)
+            n_comp += 1
+        n_rel = 0
+        for rel in result.relationships:
+            if self.upsert_relationship(rel):
+                n_rel += 1
+        self._conn.commit()
+        return n_comp, n_rel
+
     # ------------------------------------------------------------------
     # Embeddings
     # ------------------------------------------------------------------
@@ -422,6 +473,7 @@ class MetadataIndex:
         self,
         embedder: Embedder,
         component_types: list[str] | None = None,
+        component_ids: list[str] | None = None,
         batch_size: int = 32,
         force: bool = False,
     ) -> EmbeddingRefreshResult:
@@ -431,17 +483,38 @@ class MetadataIndex:
         the row is skipped. Pass `force=True` to embed everything regardless
         (useful after switching embedder models — different dim / different
         ranking, so old vectors aren't comparable to new query embeddings).
+
+        Filtering:
+          - `component_types` restricts to the given types (e.g. ApexClass).
+          - `component_ids` restricts to the given primary keys — used by the
+            post-write auto-reindex hook so a single file_write doesn't
+            re-scan every row in the index. When set, `component_types`
+            still applies as an AND-filter on top.
+          - Both None → scan every row.
         """
         result = EmbeddingRefreshResult(embedder_name=embedder.name)
 
         # Pull every row that needs work. We compare the current source's hash
         # against the stored embedded_source_hash to decide.
+        clauses: list[str] = []
+        params: list[Any] = []
         if component_types:
-            placeholders = ",".join(["?"] * len(component_types))
-            rows = self._conn.execute(
-                f"SELECT * FROM components WHERE component_type IN ({placeholders})",
-                tuple(component_types),
-            ).fetchall()
+            clauses.append(
+                f"component_type IN ({','.join(['?'] * len(component_types))})"
+            )
+            params.extend(component_types)
+        if component_ids is not None:
+            if not component_ids:
+                # Caller asked to filter to an empty id list — short-circuit
+                # rather than emit `IN ()` (SQL syntax error).
+                return result
+            clauses.append(
+                f"id IN ({','.join(['?'] * len(component_ids))})"
+            )
+            params.extend(component_ids)
+        if clauses:
+            sql = f"SELECT * FROM components WHERE {' AND '.join(clauses)}"
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
         else:
             rows = self._conn.execute("SELECT * FROM components").fetchall()
 

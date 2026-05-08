@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from rich.console import Console
@@ -35,6 +36,7 @@ from sf_dev_agent.repl_ui import (
     render_stream_terminator,
     render_streaming_text,
     render_file_write_diff,
+    render_reindex_summary,
     render_tool_blocked,
     render_tool_call_header,
     render_tool_error,
@@ -125,6 +127,111 @@ def _mode_instructions(mode: AgentMode) -> str:
     new enum value without updating this map.
     """
     return _MODE_INSTRUCTIONS.get(mode, "")
+
+
+def _reindex_files_after_write(
+    file_paths: list[Path],
+    *,
+    mock_org: bool = False,
+    embedder: Any | None = None,
+) -> dict[str, int]:
+    """Re-parse the given files into the local SQLite index after a
+    successful `file_write` or `sf_source_deploy` tool call.
+
+    Best-effort by design — every step is wrapped so a parser bug, a
+    SQLite hiccup, or a missing API key can't break the agent's tool
+    flow. Files for which no parser is registered (`.txt`, `.json`,
+    `README.md`, etc.) are silently counted in `skipped`.
+
+    Returns ``{"components": N, "relationships": N, "embedded": N,
+    "skipped": N}``.
+
+    Embedding semantics:
+      - ``mock_org=True`` skips the embed step entirely (no API quota).
+      - When ``embedder`` is None, we auto-construct via
+        ``create_embedder()`` only if ``GOOGLE_API_KEY`` is set —
+        otherwise we skip rather than silently fall back to MockEmbedder
+        (whose 64-d vectors would corrupt the real-Gemini 3072-d store).
+      - Tests inject ``embedder=MockEmbedder()`` directly to exercise
+        the embed branch without a real API call.
+      - Hash-gating in ``embed_components`` means an unchanged file's
+        re-write costs zero embedder calls.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    summary: dict[str, int] = {
+        "components": 0, "relationships": 0,
+        "embedded": 0, "skipped": 0,
+    }
+    paths = [p for p in file_paths if isinstance(p, _Path)]
+    if not paths:
+        return summary
+
+    try:
+        from sf_dev_agent.context import MetadataIndex, default_db_path
+        from sf_dev_agent.context.parsers.base import dispatch
+    except Exception:
+        logger.exception("Reindex post-write: imports failed")
+        return summary
+
+    upserted_ids: list[str] = []
+
+    try:
+        with MetadataIndex(default_db_path()) as index:
+            for path in paths:
+                try:
+                    if not path.exists():
+                        summary["skipped"] += 1
+                        continue
+                    parser = dispatch(path)
+                    if parser is None:
+                        summary["skipped"] += 1
+                        continue
+                    result = parser.parse(path)
+                    n_c, n_r = index.reindex_from_parse_result(result)
+                    summary["components"] += n_c
+                    summary["relationships"] += n_r
+                    upserted_ids.extend(c.id for c in result.components)
+                except Exception:
+                    logger.exception("Reindex failed for %s", path)
+                    summary["skipped"] += 1
+
+            # Embed step — gated, in-band, hash-aware. Skip cleanly when
+            # mock_org, when no embedder is available, or when something
+            # below raises. The index changes from above are already
+            # committed by the time we get here.
+            if upserted_ids and not mock_org:
+                resolved_embedder = embedder
+                if resolved_embedder is None:
+                    if not os.environ.get("GOOGLE_API_KEY"):
+                        logger.info(
+                            "Auto-embed after write skipped: GOOGLE_API_KEY "
+                            "not set (index updated; run /index later for embeddings)"
+                        )
+                    else:
+                        try:
+                            from sf_dev_agent.context import create_embedder
+                            resolved_embedder = create_embedder()
+                        except Exception:
+                            logger.exception(
+                                "Auto-embed after write: embedder construction failed"
+                            )
+                if resolved_embedder is not None:
+                    try:
+                        embed_result = index.embed_components(
+                            embedder=resolved_embedder,
+                            component_ids=upserted_ids,
+                        )
+                        summary["embedded"] = embed_result.embedded
+                    except Exception:
+                        logger.exception(
+                            "Auto-embed after write failed; index still updated"
+                        )
+    except Exception:
+        logger.exception("Reindex post-write failed at index level")
+
+    return summary
 
 
 def _capture_file_write_before(tool_input: dict[str, Any]) -> str | None:
@@ -772,6 +879,13 @@ class AgentLoop:
                     )
                 except Exception:
                     logger.exception("Could not render file_write diff")
+
+            # Auto-reindex hook: after a successful file_write or
+            # sf_source_deploy, parse the affected file(s) into the
+            # local SQLite index so subsequent retrieval finds them.
+            # Best-effort: never break the tool flow on a reindex error.
+            self._auto_reindex_after_write(tool_name, tool_input, result)
+
             render_tool_ok(tool_name, result_str)
             return {
                 "type": "tool_result",
@@ -873,6 +987,65 @@ class AgentLoop:
                 "user cancelled at general-mode inline approval"
             )
         return choice == "yes"
+
+    def _auto_reindex_after_write(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        result: Any,
+    ) -> None:
+        """Post-success reindex hook for write tools.
+
+        Resolves the set of files affected by `tool_name` and feeds them
+        to `_reindex_files_after_write`, then renders a one-line summary
+        when something was indexed. Never raises — every failure mode
+        bubbles up as a logged exception inside the helper.
+
+        Currently hooks:
+          - `file_write` → reindex the single written file (resolved
+            from the executor's `result["path"]`).
+          - `sf_source_deploy` → walk every file under the deploy
+            `source_path` and reindex any with a registered parser.
+        """
+        if not isinstance(result, dict) or result.get("error"):
+            return
+
+        paths: list[Path] = []
+        if tool_name == "file_write":
+            written = result.get("path")
+            if isinstance(written, str) and written:
+                paths.append(Path(written))
+        elif tool_name == "sf_source_deploy":
+            src = tool_input.get("source_path")
+            if isinstance(src, str) and src:
+                try:
+                    from sf_dev_agent.paths import agent_workspace
+                    base = (agent_workspace() / src).resolve()
+                    if base.is_dir():
+                        paths = [p for p in base.rglob("*") if p.is_file()]
+                    elif base.is_file():
+                        paths = [base]
+                except Exception:
+                    logger.exception(
+                        "Could not resolve sf_source_deploy source_path %r",
+                        src,
+                    )
+
+        if not paths:
+            return
+
+        mock_org = bool(getattr(self.tool_registry, "mock_org", False))
+        try:
+            summary = _reindex_files_after_write(paths, mock_org=mock_org)
+        except Exception:
+            logger.exception("Auto-reindex hook crashed")
+            return
+
+        if summary["components"] or summary["embedded"]:
+            try:
+                render_reindex_summary(**summary)
+            except Exception:
+                logger.exception("Could not render reindex summary")
 
 
     # ------------------------------------------------------------------

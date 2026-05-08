@@ -199,6 +199,51 @@ def render_file_write_diff(
 
 
 # ---------------------------------------------------------------------------
+# Auto-reindex summary (post-write hook)
+# ---------------------------------------------------------------------------
+
+def render_reindex_summary(
+    components: int = 0,
+    relationships: int = 0,
+    embedded: int = 0,
+    skipped: int = 0,
+) -> None:
+    """One-line note printed between the diff render and the OK line.
+
+    Format: ``│ ↻ indexed 1 component, 3 relationships, 1 embedded``
+
+    Parts whose count is zero are omitted to keep the happy path quiet
+    (e.g., a no-relationship file just prints "indexed 1 component").
+    Skipped count is suffixed in parens only when > 0.
+
+    Caller skips the call entirely if there's nothing meaningful to
+    show (no components AND no skipped); this function trusts the
+    caller and unconditionally prints what it's given.
+    """
+    parts: list[str] = []
+    if components:
+        parts.append(
+            f"{components} component{'s' if components != 1 else ''}"
+        )
+    if relationships:
+        parts.append(
+            f"{relationships} relationship{'s' if relationships != 1 else ''}"
+        )
+    if embedded:
+        parts.append(
+            f"{embedded} embedded"
+        )
+    if not parts:
+        return
+    msg = "indexed " + ", ".join(parts)
+    if skipped:
+        msg += f" ({skipped} skipped)"
+    _console.print(
+        Text("│ ", style="cyan") + Text(f"↻ {msg}", style="dim cyan")
+    )
+
+
+# ---------------------------------------------------------------------------
 # Streaming-text helpers
 # ---------------------------------------------------------------------------
 
@@ -218,6 +263,7 @@ __all__ = [
     "format_tool_input_summary",
     "get_console",
     "render_file_write_diff",
+    "render_reindex_summary",
     "render_streaming_text",
     "render_stream_terminator",
     "render_tool_blocked",
