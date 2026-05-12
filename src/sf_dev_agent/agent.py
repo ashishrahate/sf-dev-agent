@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,74 @@ class BusyError(RuntimeError):
         )
         self.text = text
         self.active_task_id = active_task_id
+
+
+# Bare approval tokens — short input that the user almost certainly meant
+# as a yes/no/modify reply to a prior approval prompt, not a new task.
+# Slice 2's safety net checks this when no plan emerges from planning.
+_STRAY_APPROVAL_PATTERN = re.compile(
+    r"^\s*(y|yes|n|no|modify)\s*$", re.IGNORECASE,
+)
+
+
+def _looks_like_stray_approval(text: str) -> bool:
+    """Heuristic: did the user accidentally answer a hung approval as a new task?"""
+    if not text:
+        return False
+    return bool(_STRAY_APPROVAL_PATTERN.match(text))
+
+
+def drive_approval_loop(agent: AgentLoop) -> Task | None:
+    """Default approval-loop driver: prompt the user until status is terminal.
+
+    Slice 2 — the I/O loop that used to be `_request_approval` lives
+    here, at module scope. Both the persistent REPL and the one-shot
+    `AgentLoop.run()` / `AgentLoop.resume()` paths call this after the
+    agent yields in AWAITING_APPROVAL. Future slices (5) may have the
+    REPL substitute its own driver to handle steer / follow-up routing.
+
+    Returns the final `Task` after the loop terminates, or None when
+    the agent has no current_task (defensive).
+    """
+    while (
+        agent.current_task is not None
+        and agent.current_task.status == TaskStatus.AWAITING_APPROVAL
+    ):
+        console.print()
+        try:
+            choice = Prompt.ask(
+                "[bold yellow]Approve this plan?[/bold yellow]",
+                choices=["yes", "no", "modify"],
+                default="no",
+            )
+        except (EOFError, KeyboardInterrupt):
+            # Leave the task in AWAITING_APPROVAL — Slice 1's busy gate
+            # will catch it on the next REPL dispatch and surface a
+            # /resume hint. No silent state-loss.
+            logger.warning(
+                "approval prompt aborted (EOF/interrupt); task left awaiting"
+            )
+            return agent.current_task
+
+        if choice == "yes":
+            return agent.approve_plan(True)
+        if choice == "no":
+            return agent.approve_plan(False)
+
+        try:
+            feedback = Prompt.ask("[bold]What would you like to change?[/bold]")
+        except (EOFError, KeyboardInterrupt):
+            logger.warning(
+                "modify-feedback prompt aborted (EOF/interrupt); task left awaiting"
+            )
+            return agent.current_task
+
+        agent.modify_plan(feedback)
+        # Loop: if modify produced a new plan, we're back in
+        # AWAITING_APPROVAL and the next iteration prompts again. If
+        # not, status is terminal and the while exits.
+
+    return agent.current_task
 
 
 # Per-mode guidance injected into the system prompt. The plan-mode block is
@@ -464,8 +533,22 @@ class AgentLoop:
         console.print(Panel(user_request, title="[bold]Task Request", border_style="blue"))
 
         if self.mode == AgentMode.PLAN:
-            return self._run_planning_then_execution()
-        return self._run_direct()
+            result = self._run_planning_then_execution()
+        else:
+            result = self._run_direct()
+
+        # Slice 2: phase composition yields in AWAITING_APPROVAL instead
+        # of blocking inside `_request_approval`. Drive the default
+        # approval UX here so one-shot CLI / non-REPL callers see the
+        # same end-to-end behavior as before. The REPL substitutes its
+        # own driver in a later slice.
+        if (
+            self.current_task is not None
+            and self.current_task.status == TaskStatus.AWAITING_APPROVAL
+        ):
+            driven = drive_approval_loop(self)
+            return driven if driven is not None else result
+        return result
 
     @classmethod
     def resume(
@@ -587,11 +670,27 @@ class AgentLoop:
                 raise ValueError(
                     f"task {task_id!r} is awaiting approval but has no saved plan"
                 )
-            return self._run_approval_then_execution()
+            result = self._run_approval_then_execution()
+            # Slice 2: drive the default approval UX so resume_cli /
+            # one-shot resume sees the same behavior as before.
+            if (
+                self.current_task is not None
+                and self.current_task.status == TaskStatus.AWAITING_APPROVAL
+            ):
+                driven = drive_approval_loop(self)
+                return driven if driven is not None else result
+            return result
 
         # Default: planning loop — picks up wherever the prior session
         # stopped (the conversation transcript is the agent's memory).
-        return self._run_planning_then_execution()
+        result = self._run_planning_then_execution()
+        if (
+            self.current_task is not None
+            and self.current_task.status == TaskStatus.AWAITING_APPROVAL
+        ):
+            driven = drive_approval_loop(self)
+            return driven if driven is not None else result
+        return result
 
     # ------------------------------------------------------------------
     # Phase composition — extracted from run() so resume() can pick up
@@ -605,15 +704,37 @@ class AgentLoop:
         return self._run_approval_then_execution()
 
     def _run_approval_then_execution(self) -> Task:
-        """Post-Phase-1: present plan, request approval, run Phase 2 if approved.
+        """Post-Phase-1: present plan and yield in AWAITING_APPROVAL.
+
+        Slice 2 of the PI-style refactor: this method no longer blocks
+        on a user prompt. It transitions to AWAITING_APPROVAL, presents
+        the plan, persists, and returns. The caller (REPL or one-shot
+        CLI) calls `drive_approval_loop(self)` to run the actual prompt
+        and dispatch to `approve_plan` / `modify_plan`.
 
         If the agent didn't produce a structured plan, treat the run as
-        complete (it answered the question directly).
+        complete (it answered the question directly) — unless the
+        user_request looks like a stray approval token left over from a
+        prior hung task, in which case we fail loudly with a hint.
         """
         if self.current_task is None:
             raise RuntimeError("AgentLoop._run_approval_then_execution called with no current_task")
 
         if not self.current_task.plan:
+            if _looks_like_stray_approval(self.current_task.user_request):
+                console.print(
+                    "[bold yellow]Looks like an approval token with no "
+                    "active task to approve.[/bold yellow] If you meant to "
+                    "continue an earlier task, try "
+                    "[cyan]/resume --latest[/cyan]."
+                )
+                self._transition(TaskStatus.FAILED)
+                self._persist_terminal_result(
+                    success=False,
+                    summary="bare approval token with no active plan",
+                )
+                return self.current_task
+
             console.print(
                 "[bold yellow]Agent did not produce a structured plan. "
                 "Task may have been answered directly.[/bold yellow]"
@@ -626,7 +747,25 @@ class AgentLoop:
         # leaves a clear "redisplay plan and re-prompt" signal for resume.
         self._transition(TaskStatus.AWAITING_APPROVAL)
         self._present_plan(self.current_task.plan)
-        approved = self._request_approval()
+        # Slice 2: yield. The caller drives the approval UX via
+        # drive_approval_loop(self) → approve_plan() / modify_plan().
+        return self.current_task
+
+    def approve_plan(self, approved: bool) -> Task:
+        """Caller-facing continuation: accept or reject the current plan.
+
+        Slice 2 — the REPL (or one-shot driver) calls this after the
+        user answers the approval prompt. Approval starts Phase 2;
+        rejection marks the task FAILED. Either way, the returned Task
+        is in a terminal status.
+        """
+        if self.current_task is None:
+            raise RuntimeError("approve_plan called with no current_task")
+        if self.current_task.status != TaskStatus.AWAITING_APPROVAL:
+            raise RuntimeError(
+                f"approve_plan called on task in status {self.current_task.status.value}; "
+                "expected awaiting_approval"
+            )
 
         if not approved:
             self._transition(TaskStatus.FAILED)
@@ -647,6 +786,52 @@ class AgentLoop:
                 )
 
         return self._run_execution_only(append_transition_message=True)
+
+    def modify_plan(self, feedback: str) -> Task:
+        """Caller-facing continuation: revise the current plan with feedback.
+
+        Slice 2 — replaces the recursive `_request_approval` modify
+        branch. Appends the revision message, re-runs the planning
+        phase, and either yields again in AWAITING_APPROVAL (caller
+        loops) or transitions to FAILED if no new plan emerged.
+        """
+        if self.current_task is None:
+            raise RuntimeError("modify_plan called with no current_task")
+        if self.current_task.status != TaskStatus.AWAITING_APPROVAL:
+            raise RuntimeError(
+                f"modify_plan called on task in status {self.current_task.status.value}; "
+                "expected awaiting_approval"
+            )
+
+        self.conversation.append({
+            "role": "user",
+            "content": f"Please revise the plan: {feedback}",
+        })
+        # Persisted state goes back to planning while the agent revises;
+        # the loop below flips it back to awaiting_approval once a new
+        # plan lands. Clear the existing plan first so "did a new plan
+        # actually emerge?" is unambiguous below — without this we'd
+        # mistake the stale plan for a successful revision.
+        self.current_task.plan = None
+        self._transition(TaskStatus.PLANNING)
+        self._agent_loop(phase="planning")
+
+        if self.current_task is not None and self.current_task.plan:
+            self._transition(TaskStatus.AWAITING_APPROVAL)
+            self._present_plan(self.current_task.plan)
+            return self.current_task
+
+        # Revision produced no new plan — fail loudly rather than
+        # leaving the task in a half-state (the original bug surface).
+        self._transition(TaskStatus.FAILED)
+        self._persist_terminal_result(success=False, summary="modify produced no plan")
+        console.print(
+            "[bold yellow]Modify produced no new plan. Task marked failed.[/bold yellow]"
+        )
+        return self.current_task if self.current_task is not None else Task(
+            task_id="unknown", tenant_id=self.org.tenant_id, user_request="",
+            status=TaskStatus.FAILED,
+        )
 
     def _run_direct(self) -> Task:
         """Single-phase loop for execution + general modes.
@@ -1382,36 +1567,6 @@ class AgentLoop:
         )
 
         console.print(Panel(Markdown(md), title="[bold]Execution Plan", border_style="yellow"))
-
-    def _request_approval(self) -> bool:
-        """Ask the user to approve, reject, or modify the plan."""
-        console.print()
-        choice = Prompt.ask(
-            "[bold yellow]Approve this plan?[/bold yellow]",
-            choices=["yes", "no", "modify"],
-            default="no",
-        )
-
-        if choice == "yes":
-            return True
-        elif choice == "modify":
-            feedback = Prompt.ask("[bold]What would you like to change?[/bold]")
-            self.conversation.append({
-                "role": "user",
-                "content": f"Please revise the plan: {feedback}",
-            })
-            # Persisted state goes back to planning while the agent revises;
-            # _present_plan + _request_approval below will flip it to
-            # awaiting_approval again.
-            self._transition(TaskStatus.PLANNING)
-            self._agent_loop(phase="planning")
-            if self.current_task and self.current_task.plan:
-                self._transition(TaskStatus.AWAITING_APPROVAL)
-                self._present_plan(self.current_task.plan)
-                return self._request_approval()
-            return False
-        else:
-            return False
 
     # ------------------------------------------------------------------
     # Helpers
