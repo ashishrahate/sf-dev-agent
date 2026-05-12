@@ -72,6 +72,7 @@ class TaskRow:
     updated_at: str
     completed_at: str | None
     mode: str = "plan"  # AgentMode enum value (slice C); default for older DBs
+    pending_question: str | None = None  # slice 4: question text while AWAITING_USER_INPUT
 
 
 class WorkingMemoryStore:
@@ -90,6 +91,7 @@ class WorkingMemoryStore:
         )
         self._conn.executescript(schema_path.read_text(encoding="utf-8"))
         self._migrate_add_mode_column()
+        self._migrate_add_pending_question_column()
 
     def _migrate_add_mode_column(self) -> None:
         """Slice C migration: add `mode` to existing `tasks` tables.
@@ -104,6 +106,21 @@ class WorkingMemoryStore:
         try:
             self._conn.execute(
                 "ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'plan'"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                return
+            raise
+
+    def _migrate_add_pending_question_column(self) -> None:
+        """Slice 4 migration: add `pending_question` for AWAITING_USER_INPUT.
+
+        Same idempotent ALTER pattern as the mode column above.
+        """
+        try:
+            self._conn.execute(
+                "ALTER TABLE tasks ADD COLUMN pending_question TEXT"
             )
             self._conn.commit()
         except sqlite3.OperationalError as exc:
@@ -203,6 +220,20 @@ class WorkingMemoryStore:
         self._conn.execute(
             "UPDATE tasks SET plan_approved = ?, updated_at = ? WHERE id = ?",
             (1 if approved else 0, _now_iso(), task_id),
+        )
+        self._conn.commit()
+
+    def set_pending_question(
+        self, task_id: str, question: str | None,
+    ) -> None:
+        """Slice 4: persist the prompt the LLM is awaiting an answer to.
+
+        Pass `None` to clear. Used by the `request_user_input` tool
+        handler and by the answer-fed resume path.
+        """
+        self._conn.execute(
+            "UPDATE tasks SET pending_question = ?, updated_at = ? WHERE id = ?",
+            (question, _now_iso(), task_id),
         )
         self._conn.commit()
 
@@ -372,10 +403,14 @@ def _now_iso() -> str:
 
 
 def _row_to_task(row: sqlite3.Row) -> TaskRow:
-    # Defensive default — `mode` may be missing on rows from very old
-    # DBs that somehow skipped the migration. Treat as plan.
+    # Defensive default — `mode` / `pending_question` may be missing on
+    # rows from very old DBs that somehow skipped a migration.
     keys = row.keys() if hasattr(row, "keys") else None
     mode_val = row["mode"] if keys is None or "mode" in keys else "plan"
+    pending = (
+        row["pending_question"]
+        if keys is None or "pending_question" in keys else None
+    )
     return TaskRow(
         id=row["id"],
         tenant_id=row["tenant_id"],
@@ -390,4 +425,5 @@ def _row_to_task(row: sqlite3.Row) -> TaskRow:
         updated_at=row["updated_at"],
         completed_at=row["completed_at"],
         mode=mode_val or "plan",
+        pending_question=pending,
     )

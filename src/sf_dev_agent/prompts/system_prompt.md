@@ -175,6 +175,7 @@ Mark tasks as completed immediately upon finishing them. Do not batch completion
 - When investigating the org's current state, prefer using the `OrgExplorer` agent to reduce context usage and parallelize lookups.
 - You can call multiple tools in a single response. If there are no dependencies between calls, make them in parallel. If a call depends on a prior result, call them sequentially.
 - Never use placeholder values in tool calls. If you don't have a required parameter, use a read-only tool to discover it first.
+- When you need a clarifying answer from the user mid-task (e.g. "which of these three orgs?" or "should I include test data?"), call `request_user_input(question, choices?)`. This pauses the run, the REPL prompts the user, and their answer comes back as the next user message. DO NOT ask in free-form prose and stop — the REPL can't reliably route a free-form reply back into the active run.
 - Use specialized tools over raw CLI when possible:
   - Use `sf_soql_query` instead of raw `sf data query` CLI commands
   - Use `sf_metadata_describe` instead of parsing raw `sf org list metadata` output

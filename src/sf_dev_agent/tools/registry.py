@@ -1128,6 +1128,54 @@ class ToolRegistry:
             executor=lambda **_: {"intercepted": True},  # never reached
         )
 
+        # --- request_user_input (intercepted — REPL prompts the user) ----
+        # Slice 4 of the PI-style refactor. The LLM calls this when it
+        # needs a clarifying answer mid-execution. The AgentLoop
+        # intercepts the call, persists the question, breaks the loop,
+        # and the REPL (or default driver) prompts the user. The answer
+        # feeds back via `agent.queue_follow_up()`.
+        self.register(
+            ToolDefinition(
+                name="request_user_input",
+                description=(
+                    "Ask the user a clarifying question mid-task and "
+                    "wait for an answer. The agent loop pauses; the "
+                    "REPL prompts the user; the answer comes back as "
+                    "the next user message. Use this instead of asking "
+                    "in free-form prose, which the REPL can't reliably "
+                    "route back into the active run.\n\n"
+                    "Examples: 'Which org should I deploy to?', "
+                    "'You have three RecordSelectorController versions; "
+                    "which one should I update?'. Keep the question "
+                    "short and answerable in one line."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": (
+                                "The question to put to the user. "
+                                "Single-line, plain text."
+                            ),
+                        },
+                        "choices": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional fixed-choice answers (e.g. "
+                                "['yes', 'no']). If supplied, the REPL "
+                                "renders them as a constrained prompt."
+                            ),
+                        },
+                    },
+                    "required": ["question"],
+                },
+                read_only=True,
+            ),
+            executor=lambda **_: {"intercepted": True},  # never reached
+        )
+
         # --- submit_plan ---
         # Schema exposed to the LLM; execution is intercepted by AgentLoop
         # before it reaches this registry — this executor is never called.

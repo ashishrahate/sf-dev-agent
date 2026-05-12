@@ -66,6 +66,7 @@ READ_ONLY_TOOLS = frozenset({
     "list_resumable_tasks",
     "get_task_summary",
     "request_resume",
+    "request_user_input",
 })
 
 # Tools that always require plan approval before execution
@@ -119,6 +120,43 @@ def _looks_like_stray_approval(text: str) -> bool:
     if not text:
         return False
     return bool(_STRAY_APPROVAL_PATTERN.match(text))
+
+
+def drive_user_input_loop(agent: AgentLoop) -> Task | None:
+    """Slice 4 default driver: prompt the user with the agent's pending
+    question and resume the run with the answer.
+
+    Loops in case `provide_user_input` triggers another
+    `request_user_input` mid-execution. Each iteration consumes one
+    AWAITING_USER_INPUT state and either resumes or yields the next.
+    """
+    while (
+        agent.current_task is not None
+        and agent.current_task.status == TaskStatus.AWAITING_USER_INPUT
+    ):
+        question = agent._pending_question or "(no question recorded)"
+        choices = agent._pending_question_choices
+        console.print()
+        console.print(
+            f"[bold cyan]Agent needs input:[/bold cyan] {question}"
+        )
+        try:
+            if choices:
+                answer = Prompt.ask(
+                    "[bold]Your answer[/bold]",
+                    choices=choices,
+                )
+            else:
+                answer = Prompt.ask("[bold]Your answer[/bold]")
+        except (EOFError, KeyboardInterrupt):
+            logger.warning(
+                "user-input prompt aborted (EOF/interrupt); task left awaiting"
+            )
+            return agent.current_task
+
+        agent.provide_user_input(answer)
+
+    return agent.current_task
 
 
 def drive_approval_loop(agent: AgentLoop) -> Task | None:
@@ -416,6 +454,14 @@ class AgentLoop:
         self._steer_queue: collections.deque[str] = collections.deque()
         self._follow_up_queue: collections.deque[str] = collections.deque()
 
+        # Slice 4 — pending question state. Set by the
+        # `request_user_input` tool handler; read by `drive_user_input_loop`
+        # (and the REPL once Slice 5 takes it over). When non-None,
+        # the agent loop breaks at the next iteration check; the caller
+        # prompts the user and resumes via `provide_user_input(answer)`.
+        self._pending_question: str | None = None
+        self._pending_question_choices: list[str] | None = None
+
         # Compute index-freshness once at construction. The REPL can refresh
         # the prompt later via /index or by recreating the AgentLoop.
         try:
@@ -589,7 +635,15 @@ class AgentLoop:
             and self.current_task.status == TaskStatus.AWAITING_APPROVAL
         ):
             driven = drive_approval_loop(self)
-            return driven if driven is not None else result
+            if driven is not None:
+                result = driven
+        if (
+            self.current_task is not None
+            and self.current_task.status == TaskStatus.AWAITING_USER_INPUT
+        ):
+            driven = drive_user_input_loop(self)
+            if driven is not None:
+                result = driven
         return result
 
     @classmethod
@@ -731,7 +785,15 @@ class AgentLoop:
             and self.current_task.status == TaskStatus.AWAITING_APPROVAL
         ):
             driven = drive_approval_loop(self)
-            return driven if driven is not None else result
+            if driven is not None:
+                result = driven
+        if (
+            self.current_task is not None
+            and self.current_task.status == TaskStatus.AWAITING_USER_INPUT
+        ):
+            driven = drive_user_input_loop(self)
+            if driven is not None:
+                result = driven
         return result
 
     # ------------------------------------------------------------------
@@ -829,6 +891,53 @@ class AgentLoop:
 
         return self._run_execution_only(append_transition_message=True)
 
+    def provide_user_input(self, answer: str) -> Task:
+        """Slice 4 caller-facing continuation: feed an answer to the
+        `request_user_input` pause and resume the agent loop.
+
+        Clears the pending-question state, appends the answer as a
+        synthetic user message, transitions back to EXECUTING, and
+        runs `_agent_loop("execution")` to continue. Returns the Task
+        in whatever terminal status the resumed loop reaches.
+        """
+        if self.current_task is None:
+            raise RuntimeError("provide_user_input called with no current_task")
+        if self.current_task.status != TaskStatus.AWAITING_USER_INPUT:
+            raise RuntimeError(
+                f"provide_user_input called on task in status "
+                f"{self.current_task.status.value}; expected awaiting_user_input"
+            )
+
+        # Inject the answer as a user message + clear pending state.
+        self.conversation.append({
+            "role": "user",
+            "content": answer,
+        })
+        self._pending_question = None
+        self._pending_question_choices = None
+        if self.working_memory is not None:
+            try:
+                self.working_memory.set_pending_question(
+                    self.current_task.task_id, None,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to clear pending_question for task %s",
+                    self.current_task.task_id,
+                )
+
+        self._transition(TaskStatus.EXECUTING)
+        self._agent_loop(phase="execution")
+
+        # If the resumed loop didn't itself transition to terminal
+        # (no more tool calls + no pending question), wrap up.
+        if self.current_task.status not in _TERMINAL_TASK_STATUSES and (
+            self._pending_question is None
+        ):
+            self._transition(TaskStatus.COMPLETE)
+            self._persist_terminal_result(success=True, summary="completed after user input")
+        return self.current_task
+
     def modify_plan(self, feedback: str) -> Task:
         """Caller-facing continuation: revise the current plan with feedback.
 
@@ -892,7 +1001,12 @@ class AgentLoop:
         )
         self._agent_loop(phase="execution")
         # Don't override an interrupt-driven FAILED status with COMPLETE.
-        if self.current_task.status not in _TERMINAL_TASK_STATUSES:
+        # Slice 4: also don't override AWAITING_USER_INPUT — the agent
+        # paused intentionally and the caller will drive the next step.
+        if (
+            self.current_task.status not in _TERMINAL_TASK_STATUSES
+            and self.current_task.status != TaskStatus.AWAITING_USER_INPUT
+        ):
             self._transition(TaskStatus.COMPLETE)
             self._persist_terminal_result(success=True, summary="completed")
         return self.current_task
@@ -922,8 +1036,11 @@ class AgentLoop:
                 f"\n[bold cyan]Resuming in {self.mode.value} mode[/bold cyan]"
             )
         self._agent_loop(phase="execution")
-        self._transition(TaskStatus.COMPLETE)
-        self._persist_terminal_result(success=True, summary="completed")
+        # Slice 4: don't override AWAITING_USER_INPUT here either —
+        # request_user_input mid-execution must yield to the driver.
+        if self.current_task.status != TaskStatus.AWAITING_USER_INPUT:
+            self._transition(TaskStatus.COMPLETE)
+            self._persist_terminal_result(success=True, summary="completed")
         return self.current_task
 
     def _persist_terminal_result(self, success: bool, summary: str) -> None:
@@ -1160,6 +1277,18 @@ class AgentLoop:
                     )
                     break
 
+                # Slice 4 — user-input hand-off: if the LLM called
+                # request_user_input, end this run after the synthetic
+                # tool_result is recorded. The caller (run() / resume()
+                # auto-drive, or the REPL) reads `_pending_question` and
+                # prompts the user.
+                if self._pending_question is not None:
+                    logger.info(
+                        "Agent loop ending — request_user_input pending: %r",
+                        self._pending_question,
+                    )
+                    break
+
                 if response.stop_reason == "end_turn":
                     logger.info("Agent signaled end_turn in %s phase", phase)
                     break
@@ -1229,6 +1358,11 @@ class AgentLoop:
         # on the next iteration check so it stops cleanly.
         if tool_name == "request_resume":
             return self._handle_request_resume(tool_input, tool_use_id)
+
+        # Slice 4: request_user_input is also intercepted — the agent
+        # loop pauses and the caller prompts the user.
+        if tool_name == "request_user_input":
+            return self._handle_request_user_input(tool_input, tool_use_id)
 
         # ----------------------------------------------------------------
         # Mode-aware write gating. Plan mode keeps today's two-stage gate
@@ -1530,6 +1664,68 @@ class AgentLoop:
                 "resume_signaled": True,
                 "task_id": task_id,
                 "next": "REPL will hand off to AgentLoop.resume()",
+            }),
+        }
+
+    def _handle_request_user_input(
+        self, tool_input: dict[str, Any], tool_use_id: str,
+    ) -> dict[str, Any]:
+        """Capture the question, transition to AWAITING_USER_INPUT, signal break.
+
+        The agent loop checks `_pending_question` at the iteration
+        terminate point (slice 4 hook) and exits cleanly. The caller
+        (run/resume auto-drive, or the REPL) prompts the user with the
+        question + optional choices, then calls `provide_user_input` to
+        resume.
+        """
+        question = tool_input.get("question")
+        if not question or not isinstance(question, str):
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": "ERROR: request_user_input requires a non-empty `question` string",
+                "is_error": True,
+            }
+        choices_raw = tool_input.get("choices")
+        choices: list[str] | None = None
+        if isinstance(choices_raw, list) and choices_raw:
+            # Coerce defensively — the LLM occasionally hands back ints / None.
+            choices = [str(c) for c in choices_raw if c is not None]
+            if not choices:
+                choices = None
+
+        self._pending_question = question
+        self._pending_question_choices = choices
+
+        # Persist so the question survives a crash + later resume.
+        if self.working_memory is not None and self.current_task is not None:
+            try:
+                self.working_memory.set_pending_question(
+                    self.current_task.task_id, question,
+                )
+                self.working_memory.update_task_status(
+                    self.current_task.task_id,
+                    TaskStatus.AWAITING_USER_INPUT.value,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist pending_question for task %s",
+                    self.current_task.task_id,
+                )
+        if self.current_task is not None:
+            self.current_task.status = TaskStatus.AWAITING_USER_INPUT
+
+        console.print(
+            f"  [cyan]Awaiting user input[/cyan] -> [bold]{question}[/bold]"
+        )
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": json.dumps({
+                "awaiting_user_input": True,
+                "question": question,
+                "choices": choices,
+                "next": "Caller will prompt the user and provide_user_input() to resume.",
             }),
         }
 

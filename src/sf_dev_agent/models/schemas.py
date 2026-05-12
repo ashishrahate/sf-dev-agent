@@ -43,6 +43,7 @@ class TaskStatus(str, Enum):
     RECEIVED = "received"
     PLANNING = "planning"
     AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_USER_INPUT = "awaiting_user_input"  # slice 4: request_user_input pause
     EXECUTING = "executing"
     VALIDATING = "validating"
     COMPLETE = "complete"
