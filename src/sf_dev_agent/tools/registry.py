@@ -479,6 +479,16 @@ class ToolRegistry:
                             "description": "Max results to return (default 25, max 100).",
                             "default": 25,
                         },
+                        "source_max_lines": {
+                            "type": "integer",
+                            "description": (
+                                "When include_source=true, trim each returned "
+                                "source to this many head lines (default ~80) "
+                                "with a `… (N more lines, full body at <id>)` "
+                                "suffix. Pass 0 for untrimmed bodies."
+                            ),
+                            "default": 80,
+                        },
                     },
                     "required": ["query"],
                 },
@@ -1370,9 +1380,28 @@ class ToolRegistry:
             "components_indexed": 0,
         }
 
+    # Default head-N lines for a returned `source` blob in code_search /
+    # retrieve_context. Long Apex classes can dominate the prompt; trimming
+    # to ~80 lines keeps the headline + signatures intact while removing
+    # the bulk of method bodies the LLM rarely needs to read in full.
+    # Caller can override via `source_max_lines` or pass 0 to disable.
+    _DEFAULT_SOURCE_MAX_LINES = 80
+
     @staticmethod
-    def _component_summary(comp: Any, include_source: bool = False) -> dict[str, Any]:
-        """Pack a ComponentRow into a compact dict for tool output."""
+    def _component_summary(
+        comp: Any,
+        include_source: bool = False,
+        source_max_lines: int | None = None,
+    ) -> dict[str, Any]:
+        """Pack a ComponentRow into a compact dict for tool output.
+
+        When `source_max_lines` is positive and the component's source is
+        longer than that, the returned `source` field is trimmed to the
+        first N lines with a `… (N more lines, full body at <component_id>)`
+        suffix. The agent can re-fetch the untrimmed body via
+        `sf_metadata_describe` or by re-running with a higher cap.
+        Pass `source_max_lines=0` to disable trimming.
+        """
         out = {
             "id": comp.id,
             "component_type": comp.component_type,
@@ -1382,8 +1411,30 @@ class ToolRegistry:
             "last_indexed_at": comp.last_indexed_at,
         }
         if include_source and comp.source is not None:
-            out["source"] = comp.source
+            cap = (
+                ToolRegistry._DEFAULT_SOURCE_MAX_LINES
+                if source_max_lines is None else source_max_lines
+            )
+            out["source"] = ToolRegistry._maybe_trim_source(
+                comp.source, comp.id, cap,
+            )
         return out
+
+    @staticmethod
+    def _maybe_trim_source(source: str, component_id: str, cap: int) -> str:
+        """Trim `source` to at most `cap` lines + a footer hint. cap<=0
+        disables trimming entirely; cap>=lines is a no-op."""
+        if cap <= 0:
+            return source
+        lines = source.splitlines()
+        if len(lines) <= cap:
+            return source
+        remaining = len(lines) - cap
+        head = "\n".join(lines[:cap])
+        return (
+            f"{head}\n… ({remaining} more line"
+            f"{'s' if remaining != 1 else ''}, full body at {component_id})"
+        )
 
     def _exec_code_search(
         self,
@@ -1391,8 +1442,14 @@ class ToolRegistry:
         component_type: str | None = None,
         include_source: bool = False,
         limit: int = 25,
+        source_max_lines: int | None = None,
     ) -> dict[str, Any]:
-        """Substring search across the metadata index."""
+        """Substring search across the metadata index.
+
+        `source_max_lines` only applies when `include_source=True`. Default
+        is class-level: trim to ~80 lines per hit. Pass 0 to get untrimmed
+        bodies (useful when the agent specifically needs full code).
+        """
         from sf_dev_agent.context import MetadataIndex
 
         db_path = self._resolve_index_db_path()
@@ -1406,7 +1463,12 @@ class ToolRegistry:
                 "query": query,
                 "component_type": component_type,
                 "match_count": len(hits),
-                "results": [self._component_summary(h, include_source) for h in hits],
+                "results": [
+                    self._component_summary(
+                        h, include_source, source_max_lines,
+                    )
+                    for h in hits
+                ],
             }
 
     def _exec_sf_dependency_graph(

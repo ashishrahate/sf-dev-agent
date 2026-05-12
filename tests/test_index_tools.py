@@ -102,6 +102,81 @@ def test_code_search_includes_source_when_requested(populated_registry: ToolRegi
     assert "class AccountHandler" in result["results"][0]["source"]
 
 
+def test_code_search_trims_long_source_by_default(
+    fixture_tree: Path, tmp_path: Path, org: OrgConnection,
+) -> None:
+    """A class longer than the default 80-line cap gets a head-N + footer."""
+    big = fixture_tree / "force-app/main/default/classes/Big.cls"
+    body_lines = "\n".join(f"    public Integer m{i}() {{ return {i}; }}" for i in range(200))
+    big.write_text(
+        f"public class Big {{\n{body_lines}\n}}\n", encoding="utf-8",
+    )
+    db_path = tmp_path / "trim_test.db"
+    result = ingest_directory(source_dir=fixture_tree, db_path=db_path)
+    assert result.success
+    registry = ToolRegistry(org=org, mock_org=False, index_db_path=db_path)
+
+    out = registry.execute(
+        "code_search",
+        {"query": "Big", "include_source": True, "limit": 5},
+    )
+    big_hit = next(
+        h for h in out["results"]
+        if h["api_name"] == "Big" and h["component_type"] == "ApexClass"
+    )
+    src = big_hit["source"]
+    # First N (default 80) lines retained; footer mentions remaining lines.
+    assert "public class Big" in src
+    assert "more line" in src
+    assert "full body at" in src
+    # And the trim was effective — total line count is much smaller than 200.
+    assert src.count("\n") < 100
+
+
+def test_code_search_source_max_lines_zero_disables_trim(
+    fixture_tree: Path, tmp_path: Path, org: OrgConnection,
+) -> None:
+    """Passing source_max_lines=0 surfaces the untrimmed body — useful when
+    the agent specifically needs the full code."""
+    big = fixture_tree / "force-app/main/default/classes/Big.cls"
+    body_lines = "\n".join(f"    public Integer m{i}() {{ return {i}; }}" for i in range(200))
+    big.write_text(
+        f"public class Big {{\n{body_lines}\n}}\n", encoding="utf-8",
+    )
+    db_path = tmp_path / "trim_test_off.db"
+    result = ingest_directory(source_dir=fixture_tree, db_path=db_path)
+    assert result.success
+    registry = ToolRegistry(org=org, mock_org=False, index_db_path=db_path)
+
+    out = registry.execute(
+        "code_search",
+        {
+            "query": "Big", "include_source": True,
+            "limit": 5, "source_max_lines": 0,
+        },
+    )
+    big_hit = next(
+        h for h in out["results"]
+        if h["api_name"] == "Big" and h["component_type"] == "ApexClass"
+    )
+    src = big_hit["source"]
+    # All 200 methods present; no trim footer.
+    assert "m199" in src
+    assert "more line" not in src
+
+
+def test_code_search_short_source_no_trim(populated_registry: ToolRegistry) -> None:
+    """Sources under the cap are returned unchanged."""
+    result = populated_registry.execute(
+        "code_search",
+        {"query": "AccountHandler", "include_source": True, "limit": 1},
+    )
+    src = result["results"][0]["source"]
+    # The fixture class is only a few lines — no footer, full content.
+    assert "more line" not in src
+    assert "class AccountHandler" in src
+
+
 def test_code_search_returns_helpful_error_when_index_missing(
     tmp_path: Path, org: OrgConnection
 ) -> None:
