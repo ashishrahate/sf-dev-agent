@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import re
@@ -406,6 +407,15 @@ class AgentLoop:
         self._turn_idx: int = 0
         self._last_tools_run: list[str] = []
 
+        # Slice 3 — PI-style input queues. `steer` injects a synthetic
+        # user message at the top of the next iteration (interrupts a
+        # turn); `follow_up` injects only when the loop would otherwise
+        # terminate (keeps the run alive). Both feed into the same
+        # `conversation` channel; the difference is where they fire in
+        # the loop. Queues are drained in `_agent_loop`.
+        self._steer_queue: collections.deque[str] = collections.deque()
+        self._follow_up_queue: collections.deque[str] = collections.deque()
+
         # Compute index-freshness once at construction. The REPL can refresh
         # the prompt later via /index or by recreating the AgentLoop.
         try:
@@ -452,21 +462,53 @@ class AgentLoop:
         return self.active_task_id is not None
 
     def prompt(self, text: str) -> Task:
-        """Single entry point for new prompts (Slice 1 surface).
+        """Single entry point for new prompts.
 
-        While idle, this is a thin wrapper over `run()`. While busy, it
-        raises `BusyError` — the REPL surfaces a hint to the user.
-        Later slices (3+) replace the raise with steer / follow-up queue
-        routing so approval answers and clarifications flow into the
-        active run instead of starting a new task.
+        While idle, this is a thin wrapper over `run()`. While busy:
+
+        - If the task is in AWAITING_APPROVAL and `text` is a bare
+          yes/no token, dispatches to `approve_plan()` directly — the
+          implicit-routing UX so a free-text "yes" never gets routed
+          as a new task (Slice 3).
+        - Otherwise raises `BusyError`. The REPL surfaces this as a
+          hint pointing at `/resume`, and Slice 5 layers a confirm-on-
+          ambiguity dialog on top so longer free text doesn't strand
+          either path.
 
         Also resets `resume_requested` so a stale flag from a prior
         run on this long-lived instance can't fire twice.
         """
         if self.is_busy:
+            # Slice 3 implicit routing: bare yes/no replies to a
+            # pending approval feed straight into approve_plan.
+            stripped = text.strip().lower() if text else ""
+            if (
+                self.current_task is not None
+                and self.current_task.status == TaskStatus.AWAITING_APPROVAL
+            ):
+                if stripped in ("y", "yes"):
+                    return self.approve_plan(True)
+                if stripped in ("n", "no"):
+                    return self.approve_plan(False)
+                # 'modify' on its own can't proceed without follow-up
+                # feedback — falls through to BusyError so the REPL
+                # (slice 5) can prompt for the feedback explicitly.
             raise BusyError(text, active_task_id=self.active_task_id)
         self.resume_requested = None
         return self.run(text)
+
+    def steer(self, text: str) -> None:
+        """Queue `text` to be injected as a user message at the next
+        iteration boundary of `_agent_loop`. Interrupts the current
+        turn — used when the user wants to redirect mid-run."""
+        self._steer_queue.append(text)
+
+    def queue_follow_up(self, text: str) -> None:
+        """Queue `text` to be injected as a user message ONLY when the
+        agent loop would otherwise terminate. Keeps the run alive past
+        what would have been the final iteration. Used for resuming a
+        task after the agent paused for clarification (Slice 4)."""
+        self._follow_up_queue.append(text)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -979,6 +1021,18 @@ class AgentLoop:
             for iteration in range(self.max_iterations):
                 logger.info("Agent loop iteration %d (phase=%s)", iteration + 1, phase)
 
+                # Slice 3 — drain steer queue at the iteration boundary.
+                # Each queued message becomes its own synthetic user
+                # turn so the LLM sees them in order and doesn't have
+                # to disentangle a concatenation.
+                if self._steer_queue:
+                    while self._steer_queue:
+                        steer_text = self._steer_queue.popleft()
+                        self.conversation.append({
+                            "role": "user",
+                            "content": f"<steer> {steer_text}",
+                        })
+
                 # Capture wall-clock around the LLM call only — token
                 # accounting and timing should reflect provider latency,
                 # not anything we did after the response landed.
@@ -1054,6 +1108,21 @@ class AgentLoop:
                 # claim a tool was the trigger of the following turn).
 
                 if not tool_calls:
+                    # Slice 3 — drain follow-up queue before terminating.
+                    # If any user input was queued while the loop was
+                    # running, inject it as a continuation and keep
+                    # iterating. Empty queue → real terminate.
+                    if self._follow_up_queue:
+                        while self._follow_up_queue:
+                            follow_up = self._follow_up_queue.popleft()
+                            self.conversation.append({
+                                "role": "user",
+                                "content": follow_up,
+                            })
+                        logger.info(
+                            "Agent loop continuing — follow-up queue drained",
+                        )
+                        continue
                     logger.info("Agent completed %s phase (no more tool calls)", phase)
                     break
 

@@ -307,12 +307,14 @@ def test_agentloop_busy_gate_direct() -> None:
     assert agent.is_busy is False
     assert agent.active_task_id is None
 
-    # prompt() on a busy agent raises BusyError carrying the task id.
+    # prompt() on a busy agent with non-approval-shaped text raises
+    # BusyError carrying the task id. ("yes" is now routed to
+    # approve_plan by Slice 3's implicit-approval shortcut.)
     agent.current_task.status = TaskStatus.AWAITING_APPROVAL
     with pytest.raises(BusyError) as exc_info:
-        agent.prompt("yes")
+        agent.prompt("now also add a test class")
     assert exc_info.value.active_task_id == "task_x"
-    assert exc_info.value.text == "yes"
+    assert exc_info.value.text == "now also add a test class"
 
 
 def test_dispatch_slash_handler_exception_kept_in_repl(
