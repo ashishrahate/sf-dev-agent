@@ -15,6 +15,7 @@ from sf_dev_agent.providers.base import (
     LLMResponse,
     StreamChunk,
     StreamChunkKind,
+    TokenUsage,
     ToolCall,
 )
 
@@ -135,6 +136,7 @@ class GeminiProvider(LLMProvider):
             text_blocks=text_blocks,
             tool_calls=tool_calls,
             stop_reason="tool_use" if tool_calls else "end_turn",
+            usage=_extract_usage(getattr(response, "usage_metadata", None)),
         )
 
     # ------------------------------------------------------------------
@@ -181,6 +183,7 @@ class GeminiProvider(LLMProvider):
         )
 
         pending_function_calls: list[Any] = []
+        latest_usage_metadata: Any = None
 
         try:
             stream = self._get_client().models.generate_content_stream(
@@ -189,6 +192,12 @@ class GeminiProvider(LLMProvider):
                 config=config,
             )
             for chunk in stream:
+                # Gemini emits usage_metadata on the final chunk (and
+                # sometimes on intermediate ones in newer SDKs). Latch the
+                # most recent value so we hand the latest total to STOP.
+                chunk_usage = getattr(chunk, "usage_metadata", None)
+                if chunk_usage is not None:
+                    latest_usage_metadata = chunk_usage
                 candidates = getattr(chunk, "candidates", None) or []
                 for candidate in candidates:
                     content = getattr(candidate, "content", None)
@@ -239,6 +248,7 @@ class GeminiProvider(LLMProvider):
         yield StreamChunk(
             kind=StreamChunkKind.STOP,
             stop_reason="tool_use" if pending_function_calls else "end_turn",
+            usage=_extract_usage(latest_usage_metadata),
         )
 
     # ------------------------------------------------------------------
@@ -309,3 +319,20 @@ class GeminiProvider(LLMProvider):
                 result.append({"role": gemini_role, "parts": parts})
 
         return result
+
+
+def _extract_usage(raw: Any) -> TokenUsage:
+    """Coerce Gemini's `usage_metadata` into the provider-neutral shape.
+
+    Gemini reports `cached_content_token_count` for cache hits; we surface
+    it under `cache_read_tokens` so Anthropic/OpenAI/Gemini all aggregate
+    the same way at the audit layer.
+    """
+    if raw is None:
+        return TokenUsage()
+    return TokenUsage(
+        input_tokens=getattr(raw, "prompt_token_count", 0) or 0,
+        output_tokens=getattr(raw, "candidates_token_count", 0) or 0,
+        cache_read_tokens=getattr(raw, "cached_content_token_count", 0) or 0,
+        cache_write_tokens=0,
+    )

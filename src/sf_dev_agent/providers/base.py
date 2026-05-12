@@ -18,10 +18,33 @@ class ToolCall:
 
 
 @dataclass
+class TokenUsage:
+    """Per-call token accounting.
+
+    Providers populate as many fields as their API surfaces. Defaults of 0
+    mean either "the model doesn't bill for this category" or "the SDK
+    didn't return it." Audit aggregations can sum across fields without
+    None-checks.
+    """
+    input_tokens: int = 0
+    output_tokens: int = 0
+    # Cache hits — input tokens that came back at a discount because the
+    # provider matched them against a cached prefix. Anthropic reports this
+    # as `cache_read_input_tokens`; OpenAI's `prompt_tokens_details.cached_tokens`;
+    # Gemini's `cached_content_token_count`. All three map here.
+    cache_read_tokens: int = 0
+    # Cache writes — input tokens billed at the cache-creation rate the
+    # first time a marker fires. Anthropic surfaces this; the others don't
+    # (their caching is implicit / free at write time).
+    cache_write_tokens: int = 0
+
+
+@dataclass
 class LLMResponse:
     text_blocks: list[str] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     stop_reason: str = "end_turn"
+    usage: TokenUsage = field(default_factory=TokenUsage)
 
 
 class StreamChunkKind(StrEnum):
@@ -68,6 +91,11 @@ class StreamChunk:
     tool_input: dict[str, Any] = field(default_factory=dict)
     # stop: terminal reason.
     stop_reason: str = ""
+    # stop: token usage for the call as a whole. Providers that stream
+    # natively (Gemini) accumulate from each chunk's usage_metadata and
+    # attach to the STOP chunk. The default chat_stream fallback (used by
+    # providers without true streaming) copies LLMResponse.usage into here.
+    usage: TokenUsage | None = None
 
 
 class LLMProvider(ABC):
@@ -143,6 +171,7 @@ class LLMProvider(ABC):
         yield StreamChunk(
             kind=StreamChunkKind.STOP,
             stop_reason=response.stop_reason,
+            usage=response.usage,
         )
 
 
@@ -166,6 +195,7 @@ def consume_stream(
     tool_calls: list[ToolCall] = []
     open_tools: dict[str, dict[str, Any]] = {}
     stop_reason = "end_turn"
+    usage: TokenUsage = TokenUsage()
 
     def _flush_text() -> None:
         nonlocal current_text
@@ -202,11 +232,14 @@ def consume_stream(
         elif chunk.kind == StreamChunkKind.STOP:
             _flush_text()
             stop_reason = chunk.stop_reason or stop_reason
+            if chunk.usage is not None:
+                usage = chunk.usage
             break
 
     _flush_text()
     return LLMResponse(
-        text_blocks=text_blocks, tool_calls=tool_calls, stop_reason=stop_reason,
+        text_blocks=text_blocks, tool_calls=tool_calls,
+        stop_reason=stop_reason, usage=usage,
     )
 
 

@@ -13,7 +13,7 @@ except ImportError as exc:
         "Run: uv pip install 'sf-dev-agent[openai]'"
     ) from exc
 
-from sf_dev_agent.providers.base import LLMProvider, LLMResponse, ToolCall
+from sf_dev_agent.providers.base import LLMProvider, LLMResponse, TokenUsage, ToolCall
 
 DEFAULT_MODEL = "gpt-4o"
 
@@ -74,6 +74,7 @@ class OpenAIProvider(LLMProvider):
             text_blocks=text_blocks,
             tool_calls=tool_calls,
             stop_reason="tool_use" if tool_calls else "end_turn",
+            usage=_extract_usage(getattr(response, "usage", None)),
         )
 
     # ------------------------------------------------------------------
@@ -128,3 +129,24 @@ class OpenAIProvider(LLMProvider):
                 result.append({"role": role, "content": " ".join(text_parts)})
 
         return result
+
+
+def _extract_usage(raw: Any) -> TokenUsage:
+    """Map OpenAI's `usage` object onto the provider-neutral `TokenUsage`.
+
+    The `prompt_tokens_details.cached_tokens` field surfaces cache hits on
+    GPT-4o family; older models don't populate it. Defaults of 0 keep
+    aggregation arithmetic clean either way.
+    """
+    if raw is None:
+        return TokenUsage()
+    cache_read = 0
+    details = getattr(raw, "prompt_tokens_details", None)
+    if details is not None:
+        cache_read = getattr(details, "cached_tokens", 0) or 0
+    return TokenUsage(
+        input_tokens=getattr(raw, "prompt_tokens", 0) or 0,
+        output_tokens=getattr(raw, "completion_tokens", 0) or 0,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=0,  # OpenAI's cache is write-free.
+    )
