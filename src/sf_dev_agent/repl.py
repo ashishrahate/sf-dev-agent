@@ -101,6 +101,52 @@ class ReplSession:
         # by /expand. Insertion order preserved so "/expand last"
         # resolves to the most recent tool call.
         self.tool_output_buffer: dict[str, dict[str, Any]] = {}
+        # Slice 1 — long-lived AgentLoop owned by this REPL session.
+        # Lazy-init on first dispatch. Rebuilt only if a setting that
+        # AgentLoop captures at construction (mode, mock_org, provider,
+        # working memory identity) drifts — `_compute_agent_signature`
+        # is what gates that. The busy gate now lives on the agent so
+        # the next prompt during an in-flight task is routed by the
+        # agent (Slice 3) instead of starting a fresh AgentLoop.
+        self._agent: AgentLoop | None = None
+        self._agent_signature: tuple | None = None
+
+    # ------------------------------------------------------------------
+    # Agent lifecycle (Slice 1) — one AgentLoop per REPL session
+    # ------------------------------------------------------------------
+
+    def _compute_agent_signature(self) -> tuple:
+        """Inputs the AgentLoop bakes in at construction.
+
+        If any of these drift between dispatches (e.g. user switched
+        mode via /mode, or /mock toggled), the agent's system prompt /
+        tool registry is stale and a rebuild is needed. Identity is
+        sufficient for `org` / `provider` / `working_memory` — they
+        don't change in place; they get reassigned.
+        """
+        return (
+            id(self.org),
+            id(self.provider),
+            self.mode,
+            self.mock_org,
+            id(self.working_memory),
+        )
+
+    def _ensure_agent(self) -> AgentLoop:
+        """Return the session's AgentLoop, building or rebuilding as needed."""
+        sig = self._compute_agent_signature()
+        if self._agent is None or self._agent_signature != sig:
+            self._agent = AgentLoop(
+                org=self.org,
+                provider=self.provider,
+                mock_org=self.mock_org,
+                working_memory=self.working_memory,
+                streaming=True,
+                mode=self.mode,
+                write_allowlist=self.write_allowlist,
+            )
+            self._agent_signature = sig
+        return self._agent
 
     # ------------------------------------------------------------------
     # Dispatcher — testable without prompt_toolkit
@@ -151,32 +197,44 @@ class ReplSession:
         then captured AFTER the prompt, so a `y` flips it before the
         AgentLoop is constructed.
 
+        Slice 1: dispatch goes through a session-scoped AgentLoop via
+        `_ensure_agent().prompt(line)`. If the agent is mid-task on a
+        non-terminal state (e.g. a prior run left it in
+        AWAITING_APPROVAL), `prompt` raises `BusyError` and the REPL
+        surfaces a hint instead of silently starting a new task. Later
+        slices replace the BusyError surface with queue routing.
+
         After the run completes, check `agent.resume_requested` — if the
         LLM called `request_resume(task_id)` mid-run, hand off to
         `AgentLoop.resume(task_id)` so the user lands back in the
         resumed task without typing a second command (C.4).
         """
+        from sf_dev_agent.agent import BusyError
+
         maybe_autosuggest_plan_mode(self, line)
 
         try:
-            agent = AgentLoop(
-                org=self.org,
-                provider=self.provider,
-                mock_org=self.mock_org,
-                working_memory=self.working_memory,
-                streaming=True,
-                mode=self.mode,
-                write_allowlist=self.write_allowlist,
-            )
-            task = agent.run(line)
+            agent = self._ensure_agent()
+            try:
+                task = agent.prompt(line)
+            except BusyError as exc:
+                console.print(
+                    f"[yellow]Agent is busy on task[/yellow] "
+                    f"[bold]{exc.active_task_id}[/bold]. "
+                    f"Resume with [cyan]/resume {exc.active_task_id}[/cyan] "
+                    f"or wait for it to finish."
+                )
+                return ReplDirective.CONTINUE
             if task is not None:
                 self.completed_task_ids.append(task.task_id)
 
             # Resume hand-off — the agent signaled it wants the REPL to
-            # pick up another task. Loop here so a chain of resumes is
-            # possible (rare, but cheap to support).
+            # pick up another task. Consume the flag on the long-lived
+            # agent before delegating, so a stale value can't re-fire
+            # on a later prompt.
             while agent.resume_requested is not None:
                 target_task_id = agent.resume_requested
+                agent.resume_requested = None
                 console.print(
                     f"\n[cyan]Resuming task {target_task_id} as requested...[/cyan]"
                 )
@@ -198,10 +256,9 @@ class ReplSession:
                 )
                 if resumed is not None:
                     self.completed_task_ids.append(resumed.task_id)
-                # `resume()` reuses the AgentLoop machinery but constructs
-                # a fresh inner AgentLoop, so its resume_requested flag
-                # belongs to that inner instance — this loop's `agent`
-                # object's flag is one-shot. Break to avoid a tight loop.
+                # `resume()` constructs a fresh inner AgentLoop, so its
+                # resume_requested flag belongs to that inner instance —
+                # ours is consumed above. Break to avoid a tight loop.
                 break
         except KeyboardInterrupt:
             console.print(

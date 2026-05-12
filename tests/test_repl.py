@@ -118,14 +118,18 @@ def test_dispatch_quit_returns_quit(session: ReplSession) -> None:
 def test_dispatch_freeform_runs_agent(
     session: ReplSession, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Free-form input creates an AgentLoop and calls .run()."""
+    """Free-form input dispatches through the session-scoped AgentLoop's prompt()."""
     captured: dict[str, Any] = {}
 
     class _FakeAgent:
+        is_busy = False
+        active_task_id = None
+        resume_requested = None
+
         def __init__(self, **kwargs: Any) -> None:
             captured["init"] = kwargs
 
-        def run(self, request: str):
+        def prompt(self, request: str):
             captured["run"] = request
             from sf_dev_agent.models.schemas import Task
             return Task(
@@ -149,12 +153,16 @@ def test_dispatch_freeform_handles_agent_exception(
     session: ReplSession, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """An exception inside agent.run shouldn't kill the REPL."""
+    """An exception inside agent.prompt shouldn't kill the REPL."""
     class _BoomAgent:
+        is_busy = False
+        active_task_id = None
+        resume_requested = None
+
         def __init__(self, **kwargs: Any) -> None:
             pass
 
-        def run(self, request: str):
+        def prompt(self, request: str):
             raise RuntimeError("simulated agent failure")
 
     monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", _BoomAgent)
@@ -169,16 +177,142 @@ def test_dispatch_freeform_handles_keyboard_interrupt(
 ) -> None:
     """Ctrl+C mid-agent leaves the REPL running."""
     class _InterruptAgent:
+        is_busy = False
+        active_task_id = None
+        resume_requested = None
+
         def __init__(self, **kwargs: Any) -> None:
             pass
 
-        def run(self, request: str):
+        def prompt(self, request: str):
             raise KeyboardInterrupt
 
     monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", _InterruptAgent)
     directive = session._dispatch("interrupt me")
     assert directive == ReplDirective.CONTINUE
     assert "Interrupted" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Slice 1 — long-lived AgentSession + busy gate
+# ---------------------------------------------------------------------------
+
+def test_session_reuses_agent_across_dispatches(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two prompts with no setting drift reuse the same AgentLoop instance."""
+    instances: list[Any] = []
+
+    class _CountingAgent:
+        is_busy = False
+        active_task_id = None
+        resume_requested = None
+
+        def __init__(self, **kwargs: Any) -> None:
+            instances.append(self)
+
+        def prompt(self, request: str):
+            from sf_dev_agent.models.schemas import Task
+            return Task(task_id=f"t{len(instances)}", tenant_id="local-dev", user_request=request)
+
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", _CountingAgent)
+    session._dispatch("first")
+    session._dispatch("second")
+    assert len(instances) == 1  # AgentLoop constructed once, reused on second prompt
+
+
+def test_session_rebuilds_agent_when_mode_changes(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mode flip via /mode invalidates the cached AgentLoop signature."""
+    from sf_dev_agent.models.schemas import AgentMode
+
+    instances: list[Any] = []
+
+    class _CountingAgent:
+        is_busy = False
+        active_task_id = None
+        resume_requested = None
+
+        def __init__(self, **kwargs: Any) -> None:
+            instances.append(self)
+
+        def prompt(self, request: str):
+            from sf_dev_agent.models.schemas import Task
+            return Task(task_id=f"t{len(instances)}", tenant_id="local-dev", user_request=request)
+
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", _CountingAgent)
+    session._dispatch("first")
+    session.mode = AgentMode.EXECUTION
+    session._dispatch("second")
+    assert len(instances) == 2  # signature drift → rebuild
+
+
+def test_dispatch_when_busy_surfaces_hint(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """If the agent is mid-task (e.g. hung at AWAITING_APPROVAL), a new prompt
+    raises BusyError and the REPL prints a hint pointing at /resume."""
+    from sf_dev_agent.agent import BusyError
+
+    class _BusyAgent:
+        is_busy = True
+        active_task_id = "task_20260512000000"
+        resume_requested = None
+
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def prompt(self, request: str):
+            raise BusyError(request, active_task_id=self.active_task_id)
+
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", _BusyAgent)
+    directive = session._dispatch("yes")
+    assert directive == ReplDirective.CONTINUE
+    out = capsys.readouterr().out
+    assert "busy" in out.lower()
+    assert "task_20260512000000" in out
+    assert "/resume" in out
+    # Nothing got appended to completed_task_ids on a busy refusal.
+    assert session.completed_task_ids == []
+
+
+def test_agentloop_busy_gate_direct() -> None:
+    """Exercise the busy-gate properties on the real AgentLoop without spinning
+    up a provider — by directly mutating current_task."""
+    from sf_dev_agent.agent import AgentLoop, BusyError
+    from sf_dev_agent.models.schemas import (
+        OrgConnection, Task, TaskStatus,
+    )
+
+    org = OrgConnection(
+        tenant_id="t", org_alias="O", org_type="developer",
+        instance_url="https://x.salesforce.com",
+    )
+    agent = AgentLoop.__new__(AgentLoop)
+    agent.current_task = None
+    assert agent.is_busy is False
+    assert agent.active_task_id is None
+
+    agent.current_task = Task(
+        task_id="task_x", tenant_id="t",
+        user_request="r", status=TaskStatus.AWAITING_APPROVAL,
+    )
+    assert agent.is_busy is True
+    assert agent.active_task_id == "task_x"
+
+    # Terminal status → idle, even though current_task is set.
+    agent.current_task.status = TaskStatus.COMPLETE
+    assert agent.is_busy is False
+    assert agent.active_task_id is None
+
+    # prompt() on a busy agent raises BusyError carrying the task id.
+    agent.current_task.status = TaskStatus.AWAITING_APPROVAL
+    with pytest.raises(BusyError) as exc_info:
+        agent.prompt("yes")
+    assert exc_info.value.active_task_id == "task_x"
+    assert exc_info.value.text == "yes"
 
 
 def test_dispatch_slash_handler_exception_kept_in_repl(

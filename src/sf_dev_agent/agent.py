@@ -86,6 +86,24 @@ _TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset({
 })
 
 
+class BusyError(RuntimeError):
+    """Raised by AgentLoop.prompt() when the agent is mid-task.
+
+    Slice 1 of the PI-style input-routing refactor: the busy gate moves
+    onto the agent itself. Until slice 3 lands the steer / follow-up
+    queues, the REPL surfaces this as a "task X is in flight" message
+    instead of starting a fresh run. Slice 3 will catch this and route
+    the input into a queue.
+    """
+    def __init__(self, text: str, *, active_task_id: str | None = None) -> None:
+        super().__init__(
+            f"agent busy on task {active_task_id!r}; "
+            f"refusing new prompt {text[:40]!r}"
+        )
+        self.text = text
+        self.active_task_id = active_task_id
+
+
 # Per-mode guidance injected into the system prompt. The plan-mode block is
 # empty so the existing prompt body (Operating Modes / Phase 1 / Phase 2 /
 # Plan Format sections) speaks for itself — backwards-compatible default.
@@ -340,6 +358,46 @@ class AgentLoop:
             INDEX_FRESHNESS=freshness_line,
             AGENT_MODE_INSTRUCTIONS=_mode_instructions(mode),
         )
+
+    # ------------------------------------------------------------------
+    # Busy gate (Slice 1)
+    # ------------------------------------------------------------------
+
+    @property
+    def active_task_id(self) -> str | None:
+        """ID of the in-flight task, or None when idle / on a terminal task.
+
+        A long-lived AgentLoop keeps `current_task` set even after a run
+        completes; this property is the "is there real work pending"
+        signal the REPL routes on.
+        """
+        if self.current_task is None:
+            return None
+        if self.current_task.status in _TERMINAL_TASK_STATUSES:
+            return None
+        return self.current_task.task_id
+
+    @property
+    def is_busy(self) -> bool:
+        """True iff there's a task in flight on this agent instance."""
+        return self.active_task_id is not None
+
+    def prompt(self, text: str) -> Task:
+        """Single entry point for new prompts (Slice 1 surface).
+
+        While idle, this is a thin wrapper over `run()`. While busy, it
+        raises `BusyError` — the REPL surfaces a hint to the user.
+        Later slices (3+) replace the raise with steer / follow-up queue
+        routing so approval answers and clarifications flow into the
+        active run instead of starting a new task.
+
+        Also resets `resume_requested` so a stale flag from a prior
+        run on this long-lived instance can't fire twice.
+        """
+        if self.is_busy:
+            raise BusyError(text, active_task_id=self.active_task_id)
+        self.resume_requested = None
+        return self.run(text)
 
     # ------------------------------------------------------------------
     # Public interface
