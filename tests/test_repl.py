@@ -256,10 +256,26 @@ def test_dispatch_when_busy_surfaces_hint(
     raises BusyError and the REPL prints a hint pointing at /resume."""
     from sf_dev_agent.agent import BusyError
 
+    from sf_dev_agent.models.schemas import Task, TaskStatus
+
     class _BusyAgent:
         is_busy = True
         active_task_id = "task_20260512000000"
         resume_requested = None
+        # Slice 5 routing reads agent.current_task.status — give the
+        # fake a status that doesn't hit the implicit-approval path so
+        # the BusyError surface is the one being tested. We use
+        # AWAITING_APPROVAL but pass non-approval-shaped text below to
+        # exit out the BusyError path.
+        # Actually simpler: use a status the slice-5 router doesn't
+        # special-case, so it falls through to agent.prompt() which is
+        # what raises.
+        current_task = Task(
+            task_id="task_20260512000000",
+            tenant_id="local-dev",
+            user_request="prior",
+            status=TaskStatus.EXECUTING,
+        )
 
         def __init__(self, **kwargs: Any) -> None:
             pass
@@ -921,6 +937,224 @@ def test_expand_error_entry_colored_red(
     assert "stack trace body" in out
     # The "error" label appears in the divider for error entries.
     assert "error" in out
+
+
+# ---------------------------------------------------------------------------
+# Slice 5 — pending-state-aware dispatch
+# ---------------------------------------------------------------------------
+
+def _busy_fake_agent(*, status_value: str, with_methods: dict[str, Any] | None = None) -> Any:
+    """Build a `_FakeAgent`-shaped object that reports as busy on the given
+    status. `with_methods` injects extra methods (approve_plan, modify_plan,
+    provide_user_input) that capture their arguments for assertion."""
+    from sf_dev_agent.models.schemas import Task, TaskStatus
+    methods = with_methods or {}
+
+    class _BusyAgent:
+        is_busy = True
+        active_task_id = "task_busy"
+        resume_requested = None
+        current_task = Task(
+            task_id="task_busy",
+            tenant_id="local-dev",
+            user_request="prior request",
+            status=TaskStatus(status_value),
+        )
+
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def prompt(self, request: str):  # never invoked in slice-5 paths
+            raise AssertionError("prompt() should not be called in this path")
+
+    for name, fn in methods.items():
+        setattr(_BusyAgent, name, fn)
+    return _BusyAgent
+
+
+def test_pending_user_input_routes_text_to_answer(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Free text while AWAITING_USER_INPUT calls agent.provide_user_input."""
+    captured: dict[str, Any] = {}
+    from sf_dev_agent.models.schemas import Task, TaskStatus
+
+    def fake_provide(self, answer: str) -> Task:
+        captured["answer"] = answer
+        self.current_task.status = TaskStatus.COMPLETE
+        return self.current_task
+
+    cls = _busy_fake_agent(
+        status_value="awaiting_user_input",
+        with_methods={"provide_user_input": fake_provide},
+    )
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", cls)
+    directive = session._dispatch("the sandbox org")
+    assert directive == ReplDirective.CONTINUE
+    assert captured["answer"] == "the sandbox org"
+    assert "task_busy" in session.completed_task_ids
+
+
+def test_awaiting_approval_yes_falls_through_to_prompt(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare 'yes' while AWAITING_APPROVAL still goes through agent.prompt()
+    (slice 3 routes it to approve_plan from there)."""
+    captured: dict[str, Any] = {}
+    from sf_dev_agent.models.schemas import Task, TaskStatus
+
+    def fake_prompt(self, request: str) -> Task:
+        captured["prompt"] = request
+        self.current_task.status = TaskStatus.COMPLETE
+        return self.current_task
+
+    cls = _busy_fake_agent(
+        status_value="awaiting_approval",
+        with_methods={"prompt": fake_prompt},
+    )
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", cls)
+    session._dispatch("yes")
+    assert captured["prompt"] == "yes"
+
+
+def test_awaiting_approval_modify_prompts_for_feedback(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare 'modify' triggers a feedback prompt; the answer is fed to modify_plan."""
+    captured: dict[str, Any] = {}
+    from sf_dev_agent.models.schemas import Task, TaskStatus
+
+    def fake_modify(self, feedback: str) -> Task:
+        captured["feedback"] = feedback
+        self.current_task.status = TaskStatus.FAILED  # terminal
+        return self.current_task
+
+    cls = _busy_fake_agent(
+        status_value="awaiting_approval",
+        with_methods={"modify_plan": fake_modify},
+    )
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", cls)
+    monkeypatch.setattr(
+        "sf_dev_agent.repl.Prompt.ask",
+        lambda *a, **kw: "use a Map<Id, Account> instead",
+    )
+    session._dispatch("modify")
+    assert captured["feedback"] == "use a Map<Id, Account> instead"
+
+
+def test_awaiting_approval_freeform_continue_routes_to_modify(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Longer free text + 'continue' → fed to modify_plan as revision feedback."""
+    captured: dict[str, Any] = {}
+    from sf_dev_agent.models.schemas import Task, TaskStatus
+
+    def fake_modify(self, feedback: str) -> Task:
+        captured["feedback"] = feedback
+        self.current_task.status = TaskStatus.FAILED
+        return self.current_task
+
+    cls = _busy_fake_agent(
+        status_value="awaiting_approval",
+        with_methods={"modify_plan": fake_modify},
+    )
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", cls)
+    monkeypatch.setattr(
+        "sf_dev_agent.repl.Prompt.ask",
+        lambda *a, **kw: "continue",
+    )
+    session._dispatch("can you also include a test class")
+    assert captured["feedback"] == "can you also include a test class"
+
+
+def test_awaiting_approval_freeform_new_cancels_then_dispatches(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Longer free text + 'new' → cancel pending plan, then dispatch as new task."""
+    captured: dict[str, Any] = {"approve": None, "prompts": []}
+    from sf_dev_agent.models.schemas import Task, TaskStatus
+
+    def fake_approve(self, approved: bool) -> Task:
+        captured["approve"] = approved
+        self.current_task.status = TaskStatus.FAILED
+        self.is_busy = False
+        return self.current_task
+
+    def fake_prompt(self, request: str) -> Task:
+        captured["prompts"].append(request)
+        return Task(
+            task_id="task_new", tenant_id="local-dev",
+            user_request=request, status=TaskStatus.COMPLETE,
+        )
+
+    cls = _busy_fake_agent(
+        status_value="awaiting_approval",
+        with_methods={"approve_plan": fake_approve, "prompt": fake_prompt},
+    )
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", cls)
+    monkeypatch.setattr(
+        "sf_dev_agent.repl.Prompt.ask",
+        lambda *a, **kw: "new",
+    )
+    session._dispatch("instead, just check what's in the org")
+    # Cancelled with False; new task dispatched.
+    assert captured["approve"] is False
+    assert captured["prompts"] == ["instead, just check what's in the org"]
+
+
+def test_awaiting_approval_freeform_cancel_is_noop(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Longer free text + 'cancel' → leave the pending task alone, no new task."""
+    captured: dict[str, Any] = {"called": False}
+    from sf_dev_agent.models.schemas import Task
+
+    def fake_modify(self, feedback: str) -> Task:
+        captured["called"] = True
+        return self.current_task
+
+    cls = _busy_fake_agent(
+        status_value="awaiting_approval",
+        with_methods={"modify_plan": fake_modify},
+    )
+    monkeypatch.setattr("sf_dev_agent.repl.AgentLoop", cls)
+    monkeypatch.setattr(
+        "sf_dev_agent.repl.Prompt.ask",
+        lambda *a, **kw: "cancel",
+    )
+    session._dispatch("hmm let me think")
+    assert captured["called"] is False
+
+
+def test_autosuggest_skipped_when_agent_busy(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`maybe_autosuggest_plan_mode` should no-op when the agent has an
+    active task — the input is almost certainly a continuation."""
+    from sf_dev_agent.models.schemas import AgentMode, Task, TaskStatus
+
+    session.mode = AgentMode.EXECUTION  # would normally trigger the suggest
+
+    class _BusyAgent:
+        is_busy = True
+        active_task_id = "task_x"
+
+    session._agent = _BusyAgent()  # type: ignore[assignment]
+    # Capture any Prompt.ask call — if autosuggest runs, it would try to.
+    asked = {"called": False}
+
+    def watcher(*a, **kw):
+        asked["called"] = True
+        return "n"
+
+    from sf_dev_agent.repl import maybe_autosuggest_plan_mode
+    monkeypatch.setattr("sf_dev_agent.repl.Prompt.ask", watcher)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    maybe_autosuggest_plan_mode(session, "deploy the trigger")  # code-change keyword
+    assert asked["called"] is False
+    assert session.mode == AgentMode.EXECUTION  # unchanged
 
 
 # ---------------------------------------------------------------------------

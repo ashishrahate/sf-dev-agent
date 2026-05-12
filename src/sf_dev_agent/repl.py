@@ -189,32 +189,56 @@ class ReplSession:
             return ReplDirective.CONTINUE
 
     def _dispatch_agent(self, line: str) -> ReplDirective:
-        """Run the agent against `line` as a fresh task.
+        """Run the agent against `line`, routing implicitly when busy.
 
         Pre-dispatch hook: if the user is in execution or general mode
         AND the input looks like a code-change ask, soft-prompt to
         switch to plan mode. Slice B autosuggest. The session mode is
         then captured AFTER the prompt, so a `y` flips it before the
-        AgentLoop is constructed.
+        AgentLoop is constructed. Skipped when the agent is mid-task
+        (Slice 5) — the input is almost certainly a continuation, not
+        a fresh code-change ask.
 
-        Slice 1: dispatch goes through a session-scoped AgentLoop via
-        `_ensure_agent().prompt(line)`. If the agent is mid-task on a
-        non-terminal state (e.g. a prior run left it in
-        AWAITING_APPROVAL), `prompt` raises `BusyError` and the REPL
-        surfaces a hint instead of silently starting a new task. Later
-        slices replace the BusyError surface with queue routing.
+        Slice 5 — pending-state-aware routing. Before dispatching as a
+        fresh task we check the session's AgentLoop:
+
+          - `AWAITING_USER_INPUT` → any text is the answer; feed via
+            `agent.provide_user_input(line)`.
+          - `AWAITING_APPROVAL` + bare yes/no/y/n → slice-3 routing in
+            `prompt()` dispatches to `approve_plan`.
+          - `AWAITING_APPROVAL` + "modify" → prompt for feedback,
+            then `agent.modify_plan(feedback)`.
+          - `AWAITING_APPROVAL` + longer free text → ask the user
+            "continue task X or start new?".
 
         After the run completes, check `agent.resume_requested` — if the
         LLM called `request_resume(task_id)` mid-run, hand off to
-        `AgentLoop.resume(task_id)` so the user lands back in the
-        resumed task without typing a second command (C.4).
+        `AgentLoop.resume(task_id)`.
         """
-        from sf_dev_agent.agent import BusyError
+        from sf_dev_agent.agent import BusyError, TaskStatus
+
+        agent = self._ensure_agent()
+
+        # Slice 5 — pending-state-aware routing. Has to run BEFORE
+        # `maybe_autosuggest_plan_mode` so we don't pop a plan-mode
+        # nudge when the user is continuing an in-flight task.
+        if agent.is_busy and agent.current_task is not None:
+            status = agent.current_task.status
+
+            if status == TaskStatus.AWAITING_USER_INPUT:
+                return self._dispatch_pending_user_input(agent, line)
+
+            if status == TaskStatus.AWAITING_APPROVAL:
+                stripped = line.strip().lower()
+                if stripped == "modify":
+                    return self._dispatch_modify_with_feedback(agent)
+                if stripped not in ("y", "yes", "n", "no"):
+                    return self._dispatch_ambiguous_while_busy(agent, line)
+                # Otherwise fall through — slice 3's prompt() handles it.
 
         maybe_autosuggest_plan_mode(self, line)
 
         try:
-            agent = self._ensure_agent()
             try:
                 task = agent.prompt(line)
             except BusyError as exc:
@@ -272,6 +296,105 @@ class ReplSession:
                 "Re-run with [cyan]/verbose on[/cyan] for details."
             )
         return ReplDirective.CONTINUE
+
+    # ------------------------------------------------------------------
+    # Slice 5 — pending-state routing helpers
+    # ------------------------------------------------------------------
+
+    def _dispatch_pending_user_input(
+        self, agent: AgentLoop, line: str,
+    ) -> ReplDirective:
+        """Feed `line` to a task paused on `request_user_input`."""
+        try:
+            task = agent.provide_user_input(line)
+            if task is not None and task.status.value in (
+                "complete", "failed", "rolled_back",
+            ):
+                self.completed_task_ids.append(task.task_id)
+        except Exception:
+            logger.exception("provide_user_input raised")
+            console.print(
+                "[red]Failed to resume task with user input.[/red] "
+                "Re-run with [cyan]/verbose on[/cyan] for details."
+            )
+        return ReplDirective.CONTINUE
+
+    def _dispatch_modify_with_feedback(
+        self, agent: AgentLoop,
+    ) -> ReplDirective:
+        """User typed bare 'modify' while a plan is awaiting approval —
+        prompt for the revision feedback and call `agent.modify_plan`."""
+        try:
+            feedback = Prompt.ask("[bold]What would you like to change?[/bold]")
+        except (EOFError, KeyboardInterrupt):
+            console.print("[yellow]Modify cancelled.[/yellow]")
+            return ReplDirective.CONTINUE
+        try:
+            task = agent.modify_plan(feedback)
+            if task is not None and task.status.value in (
+                "complete", "failed", "rolled_back",
+            ):
+                self.completed_task_ids.append(task.task_id)
+        except Exception:
+            logger.exception("modify_plan raised")
+            console.print(
+                "[red]Modify failed.[/red] "
+                "Re-run with [cyan]/verbose on[/cyan] for details."
+            )
+        return ReplDirective.CONTINUE
+
+    def _dispatch_ambiguous_while_busy(
+        self, agent: AgentLoop, line: str,
+    ) -> ReplDirective:
+        """User typed non-approval-shaped text while a task is awaiting
+        approval. Confirm whether it's a continuation of the active
+        task or a brand-new request."""
+        active_id = agent.active_task_id
+        console.print(
+            f"[yellow]A task is awaiting approval:[/yellow] "
+            f"[bold]{active_id}[/bold]."
+        )
+        try:
+            choice = Prompt.ask(
+                "Continue this task or start a new request?",
+                choices=["continue", "new", "cancel"],
+                default="continue",
+            )
+        except (EOFError, KeyboardInterrupt):
+            console.print("[yellow]No change — task still awaiting.[/yellow]")
+            return ReplDirective.CONTINUE
+
+        if choice == "cancel":
+            return ReplDirective.CONTINUE
+        if choice == "continue":
+            # Treat the input as a modify-plan revision request.
+            try:
+                task = agent.modify_plan(line)
+                if task is not None and task.status.value in (
+                    "complete", "failed", "rolled_back",
+                ):
+                    self.completed_task_ids.append(task.task_id)
+            except Exception:
+                logger.exception("modify_plan raised from ambiguity dispatch")
+                console.print(
+                    "[red]Failed to apply revision.[/red] "
+                    "Re-run with [cyan]/verbose on[/cyan] for details."
+                )
+            return ReplDirective.CONTINUE
+
+        # "new" — reject the active plan to free the agent, then dispatch
+        # the line as a fresh task.
+        try:
+            agent.approve_plan(False)
+        except Exception:
+            logger.exception("approve_plan(False) raised on ambiguity dispatch")
+            console.print(
+                "[red]Failed to cancel the pending task.[/red] "
+                "Use [cyan]/resume --latest[/cyan] to clean up manually."
+            )
+            return ReplDirective.CONTINUE
+        # Dispatch the line normally now that the agent is idle.
+        return self._dispatch_agent(line)
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +477,9 @@ def maybe_autosuggest_plan_mode(session: ReplSession, user_input: str) -> None:
       - Current mode is execution or general (plan mode is already safe).
       - Input looks like a code-change ask (keyword heuristic).
       - stdin is a TTY (don't pollute scripted/CI runs).
+      - The session's agent is NOT mid-task (Slice 5) — when busy the
+        input is almost always a continuation, not a fresh ask, so the
+        plan-mode nudge would just be noise.
 
     No-op on `n` / Enter; flips `session.mode = PLAN` on `y`.
     """
@@ -364,6 +490,8 @@ def maybe_autosuggest_plan_mode(session: ReplSession, user_input: str) -> None:
     if not looks_like_code_change(user_input):
         return
     if not sys.stdin.isatty():
+        return
+    if session._agent is not None and session._agent.is_busy:
         return
 
     console.print(Panel(
