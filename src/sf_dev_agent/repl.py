@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
@@ -36,6 +37,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+from sf_dev_agent import repl_ui
 from sf_dev_agent.agent import AgentLoop
 from sf_dev_agent.index_freshness import (
     check_freshness,
@@ -94,6 +96,11 @@ class ReplSession:
         # Track tasks completed during this REPL session — used by C.5
         # for the /quit extract nudge.
         self.completed_task_ids: list[str] = []
+        # v2 slice 3 — captured tool outputs keyed by tool_use_id.
+        # Populated by repl_ui via `set_tool_output_buffer`; inspected
+        # by /expand. Insertion order preserved so "/expand last"
+        # resolves to the most recent tool call.
+        self.tool_output_buffer: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Dispatcher — testable without prompt_toolkit
@@ -575,6 +582,12 @@ def launch_repl(
     _print_banner(session)
     pt_session = _build_prompt_session(session)
 
+    # v2 slice 3 — register the session's tool-output buffer so repl_ui
+    # can capture every tool result for `/expand <id>` recall. Detached
+    # at session end so a one-shot CLI invocation that imports this
+    # module never sees stale capture state.
+    repl_ui.set_tool_output_buffer(session.tool_output_buffer)
+
     try:
         while True:
             try:
@@ -588,6 +601,7 @@ def launch_repl(
             if directive == ReplDirective.QUIT:
                 break
     finally:
+        repl_ui.set_tool_output_buffer(None)
         if own_working_memory:
             try:
                 working_memory.close()

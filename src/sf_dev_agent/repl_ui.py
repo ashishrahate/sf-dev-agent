@@ -1,4 +1,4 @@
-"""Tool-call rendering helpers for the REPL — Claude-Code-style v1.
+"""Tool-call rendering helpers for the REPL — Claude-Code-style v1+v2.
 
 Centralizes how tool calls and their results show up in the terminal so the
 agent loop doesn't sprinkle ad-hoc `console.print` calls. Goals:
@@ -13,7 +13,8 @@ agent loop doesn't sprinkle ad-hoc `console.print` calls. Goals:
 v2 — landing in slices:
 - Slice 1 ✅ Inline diffs for `file_write` (this module's `render_file_write_diff`).
 - Slice 2 (deferred): syntax highlighting for code-shaped tool results.
-- Slice 3 (deferred): collapsible / expandable tool blocks via tool_use_id capture.
+- Slice 3 ✅ Collapsible / expandable tool blocks via tool_use_id capture
+  (head-N-lines preview + /expand <id> recovers the full payload).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import difflib
 import json
+import os
 from typing import Any, Iterator
 
 from rich.console import Console
@@ -30,11 +32,60 @@ from rich.text import Text
 # a Console pointed at a StringIO via `set_console_for_tests`.
 _console: Console = Console()
 
+# Collapse / expand state — v2 slice 3.
+#
+# `_TOOL_OUTPUT_BUFFER` is set by the REPL session at launch and cleared on
+# exit. While set, `render_tool_ok` / `render_tool_error` insert each tool
+# result so `/expand <id>` can recover the full payload later. Insertion
+# order is preserved so `/expand last` resolves to the most recent call.
+# When the buffer is None (one-shot CLI runs, tests that don't opt in), the
+# render path is unchanged.
+_TOOL_OUTPUT_BUFFER: dict[str, dict[str, Any]] | None = None
+
+# How many head lines of a long tool result to preview inline before the
+# `… N more lines` hint. Configurable via `REPL_COLLAPSE_LINES` so users
+# can dial it up/down without code changes.
+_DEFAULT_COLLAPSE_LINES = 5
+try:
+    _COLLAPSE_LINES_THRESHOLD: int = max(
+        0, int(os.environ.get("REPL_COLLAPSE_LINES", _DEFAULT_COLLAPSE_LINES))
+    )
+except ValueError:
+    _COLLAPSE_LINES_THRESHOLD = _DEFAULT_COLLAPSE_LINES
+
+# Tools whose results never get the preview-and-hint treatment. submit_plan
+# renders its plan elsewhere; we don't want to double-render or confuse the
+# user with a `/expand` hint they'd never use.
+_NO_PREVIEW_TOOLS: frozenset[str] = frozenset({"submit_plan"})
+
 
 def set_console_for_tests(console: Console) -> None:
     """Swap the module-level console — only intended for unit tests."""
     global _console
     _console = console
+
+
+def set_tool_output_buffer(buf: dict[str, dict[str, Any]] | None) -> None:
+    """Register a session-scoped buffer for `/expand` recall.
+
+    Pass a dict (preserves insertion order in Python 3.7+) to opt in; pass
+    `None` to detach. Caller owns the buffer's lifetime — the REPL clears
+    its own copy at session end so memory doesn't grow across sessions.
+    """
+    global _TOOL_OUTPUT_BUFFER
+    _TOOL_OUTPUT_BUFFER = buf
+
+
+def set_collapse_lines_threshold(n: int) -> None:
+    """Override the inline-preview threshold. Mostly for tests; production
+    callers use the `REPL_COLLAPSE_LINES` env var instead."""
+    global _COLLAPSE_LINES_THRESHOLD
+    _COLLAPSE_LINES_THRESHOLD = max(0, n)
+
+
+def get_collapse_lines_threshold() -> int:
+    """Accessor — useful for tests that need to assert against the active value."""
+    return _COLLAPSE_LINES_THRESHOLD
 
 
 def get_console() -> Console:
@@ -99,19 +150,91 @@ def render_tool_call_header(tool_name: str, tool_input: Any) -> None:
     )
 
 
-def render_tool_ok(tool_name: str, result_str: str) -> None:
+def render_tool_ok(
+    tool_name: str,
+    result_str: str,
+    tool_use_id: str | None = None,
+) -> None:
     """Success line. Char count gives a sense of result volume without
-    dumping the full payload (the LLM still gets the full text)."""
+    dumping the full payload (the LLM still gets the full text).
+
+    When a REPL session has registered a tool-output buffer AND a
+    `tool_use_id` is supplied, the full result is stored for later
+    `/expand <id>` recall. For long results, a head-N-lines preview is
+    printed under the success line with a hint pointing at `/expand`.
+    """
     _console.print(
         f"[green]└ ✓[/green] [dim]{tool_name} → {len(result_str)} chars[/dim]"
     )
+    _maybe_buffer_and_preview(tool_name, result_str, tool_use_id, is_error=False)
 
 
-def render_tool_error(tool_name: str, error_msg: str) -> None:
-    """Error line. Truncated to keep one tool's failure from eating the screen."""
+def render_tool_error(
+    tool_name: str,
+    error_msg: str,
+    tool_use_id: str | None = None,
+) -> None:
+    """Error line. Truncated to keep one tool's failure from eating the screen.
+
+    Like the success path, the full error is captured into the session
+    buffer (if one is registered) so `/expand <id>` can recover the
+    untrimmed text — useful for debugging failures where the truncated
+    surface drops the stack trace.
+    """
     _console.print(
         f"[red]└ ✗[/red] [bold red]{tool_name}[/bold red] "
         f"[red]{_truncate(error_msg, 200)}[/red]"
+    )
+    # Errors get captured but never preview-rendered — the truncated
+    # one-liner above is already visible; `/expand` reveals the rest.
+    _maybe_buffer_and_preview(tool_name, error_msg, tool_use_id, is_error=True)
+
+
+def _maybe_buffer_and_preview(
+    tool_name: str,
+    payload: str,
+    tool_use_id: str | None,
+    *,
+    is_error: bool,
+) -> None:
+    """Store `payload` in the session buffer (if registered) and render a
+    head-N-lines preview for long success outputs.
+
+    Errors are stored but not previewed — the truncated render_tool_error
+    line is already visible to the user, and a multi-line stack trace
+    would defeat the point of the truncation. `/expand <id>` still
+    recovers the full text.
+    """
+    if _TOOL_OUTPUT_BUFFER is None or not tool_use_id:
+        return
+
+    _TOOL_OUTPUT_BUFFER[tool_use_id] = {
+        "tool_name": tool_name,
+        "payload": payload,
+        "is_error": is_error,
+    }
+
+    if is_error or tool_name in _NO_PREVIEW_TOOLS:
+        return
+
+    lines = payload.splitlines()
+    if len(lines) <= _COLLAPSE_LINES_THRESHOLD:
+        return
+
+    # Show first N lines under the success line, then a hint with the
+    # tool_use_id (or its 12-char prefix when very long) so the user can
+    # `/expand` to see the rest.
+    short_id = tool_use_id if len(tool_use_id) <= 16 else tool_use_id[:12]
+    for line in lines[:_COLLAPSE_LINES_THRESHOLD]:
+        _console.print(Text("│ ", style="cyan") + Text(line, style="dim"))
+    remaining = len(lines) - _COLLAPSE_LINES_THRESHOLD
+    _console.print(
+        Text("│ ", style="cyan")
+        + Text(
+            f"… {remaining} more line{'s' if remaining != 1 else ''} "
+            f"— /expand {short_id}",
+            style="dim italic",
+        )
     )
 
 
@@ -261,6 +384,7 @@ def render_stream_terminator() -> None:
 
 __all__ = [
     "format_tool_input_summary",
+    "get_collapse_lines_threshold",
     "get_console",
     "render_file_write_diff",
     "render_reindex_summary",
@@ -270,6 +394,8 @@ __all__ = [
     "render_tool_call_header",
     "render_tool_error",
     "render_tool_ok",
+    "set_collapse_lines_threshold",
     "set_console_for_tests",
+    "set_tool_output_buffer",
     "tool_status",
 ]

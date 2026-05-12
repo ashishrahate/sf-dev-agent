@@ -193,3 +193,148 @@ def test_render_file_write_diff_handles_rich_markup_chars(capture) -> None:
     out = capture.getvalue()
     # The literal bracketed text appears in the output.
     assert "[red]not a tag[/red]" in out
+
+
+# ---------------------------------------------------------------------------
+# v2 slice 3 — collapsible tool blocks
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def buffer_registered():
+    """Register a fresh dict as the session tool-output buffer for the test,
+    then detach afterward so other tests stay isolated."""
+    buf: dict = {}
+    repl_ui.set_tool_output_buffer(buf)
+    yield buf
+    repl_ui.set_tool_output_buffer(None)
+
+
+def test_render_tool_ok_no_buffer_keeps_one_line(capture) -> None:
+    """Backwards compat: when no buffer is registered, render_tool_ok prints
+    only the success line — no preview, no hint, no buffering happens."""
+    repl_ui.render_tool_ok("code_search", "x\n" * 100)
+    out = capture.getvalue()
+    assert "code_search" in out
+    assert "✓" in out
+    # No preview body, no hint.
+    assert "more line" not in out
+    assert "/expand" not in out
+
+
+def test_render_tool_ok_short_result_no_preview(capture, buffer_registered) -> None:
+    """Short result: buffer captures the payload but no preview is shown."""
+    payload = "ok\nshort\n"
+    repl_ui.render_tool_ok("ping", payload, tool_use_id="toolu_short01")
+    out = capture.getvalue()
+    assert "ping" in out
+    assert "more line" not in out
+    assert "/expand" not in out
+    # Captured for later /expand recall.
+    assert buffer_registered["toolu_short01"]["payload"] == payload
+    assert buffer_registered["toolu_short01"]["tool_name"] == "ping"
+    assert buffer_registered["toolu_short01"]["is_error"] is False
+
+
+def test_render_tool_ok_long_result_renders_preview_and_hint(
+    capture, buffer_registered,
+) -> None:
+    """Long result: preview shows the first N lines + a /expand hint
+    pointing at the tool_use_id."""
+    payload = "\n".join(f"line{i}" for i in range(40))
+    repl_ui.render_tool_ok("retrieve_context", payload, tool_use_id="toolu_long01")
+    out = capture.getvalue()
+    threshold = repl_ui.get_collapse_lines_threshold()
+    # First N lines appear in the preview body.
+    for i in range(threshold):
+        assert f"line{i}" in out
+    # The N+1th line should NOT be in the preview itself (it lives in the
+    # buffer for /expand).
+    # Construct the hint line literal — `… <n> more lines — /expand <id>`.
+    remaining = 40 - threshold
+    assert f"{remaining} more line" in out
+    assert "/expand" in out
+    assert "toolu_long01" in out
+    # Full payload still captured (the LLM/agent still gets the whole thing
+    # via the return value, but /expand needs it stored here).
+    assert buffer_registered["toolu_long01"]["payload"] == payload
+
+
+def test_render_tool_ok_submit_plan_skips_preview(
+    capture, buffer_registered,
+) -> None:
+    """submit_plan has its own plan rendering — don't double up with the
+    collapse preview. Still captured for /expand though."""
+    payload = "\n".join(f"step{i}" for i in range(20))
+    repl_ui.render_tool_ok("submit_plan", payload, tool_use_id="toolu_plan01")
+    out = capture.getvalue()
+    assert "submit_plan" in out
+    assert "more line" not in out
+    assert "/expand toolu_plan01" not in out
+    assert "toolu_plan01" in buffer_registered
+
+
+def test_render_tool_error_captures_but_skips_preview(
+    capture, buffer_registered,
+) -> None:
+    """Errors get buffered for /expand but never preview-rendered — the
+    truncated one-liner is already visible and a multi-line stack trace
+    would defeat the truncation."""
+    err = "BoomError: " + "\n".join(f"frame{i}" for i in range(30))
+    repl_ui.render_tool_error("code_search", err, tool_use_id="toolu_err01")
+    out = capture.getvalue()
+    # Truncated error line rendered as before.
+    assert "BoomError" in out
+    assert "✗" in out
+    # No preview body, no hint.
+    assert "more line" not in out
+    assert "/expand toolu_err01" not in out
+    # Captured with is_error=True so /expand --list can color it differently.
+    assert buffer_registered["toolu_err01"]["is_error"] is True
+    assert buffer_registered["toolu_err01"]["payload"] == err
+
+
+def test_render_tool_ok_long_id_truncated_in_hint(capture, buffer_registered) -> None:
+    """A very long tool_use_id is shown as the 12-char prefix in the hint —
+    /expand accepts prefix match so this stays usable."""
+    long_id = "toolu_" + "X" * 50
+    payload = "\n".join(f"l{i}" for i in range(20))
+    repl_ui.render_tool_ok("any_tool", payload, tool_use_id=long_id)
+    out = capture.getvalue()
+    # 12-char prefix shows in the hint, but the full id stays in the buffer.
+    assert "toolu_XXXXXX" in out  # first 12 chars
+    assert long_id in buffer_registered
+
+
+def test_set_collapse_lines_threshold_clamps_negative() -> None:
+    """Negative thresholds clamp to 0 so we never index lines[:-N]."""
+    prev = repl_ui.get_collapse_lines_threshold()
+    try:
+        repl_ui.set_collapse_lines_threshold(-5)
+        assert repl_ui.get_collapse_lines_threshold() == 0
+    finally:
+        repl_ui.set_collapse_lines_threshold(prev)
+
+
+def test_threshold_zero_previews_everything(capture, buffer_registered) -> None:
+    """Threshold=0 means every multi-line output shows the hint (no head
+    preview), still captures. Useful when the user wants pure /expand UX."""
+    prev = repl_ui.get_collapse_lines_threshold()
+    try:
+        repl_ui.set_collapse_lines_threshold(0)
+        payload = "a\nb\nc"
+        repl_ui.render_tool_ok("t", payload, tool_use_id="toolu_zero")
+        out = capture.getvalue()
+        assert "3 more line" in out
+        assert "/expand toolu_zero" in out
+    finally:
+        repl_ui.set_collapse_lines_threshold(prev)
+
+
+def test_buffer_detach_after_session() -> None:
+    """`set_tool_output_buffer(None)` cleanly detaches — subsequent renders
+    don't crash and don't try to write to a stale dict."""
+    repl_ui.set_tool_output_buffer({})
+    repl_ui.set_tool_output_buffer(None)
+    # Should not raise. No fixture/capture needed — we just want a clean
+    # signal that the no-op path doesn't NPE.
+    repl_ui.render_tool_ok("ping", "ok", tool_use_id="toolu_x")

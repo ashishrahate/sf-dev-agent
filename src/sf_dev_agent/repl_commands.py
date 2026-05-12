@@ -264,6 +264,103 @@ def cmd_mode(session: ReplSession, argv: list[str]) -> ReplDirective:
     return ReplDirective.CONTINUE
 
 
+def cmd_expand(session: ReplSession, argv: list[str]) -> ReplDirective:
+    """Reveal the full output of a previously-collapsed tool call.
+
+    Usage:
+      /expand <tool_use_id>   — print the stored payload for that id (prefix match).
+      /expand last            — print the most recent tool call's payload.
+      /expand --list          — list every captured tool_use_id in this session.
+
+    The buffer is populated by `repl_ui.render_tool_ok` / `render_tool_error`
+    while a REPL session is active. It's session-scoped — a fresh REPL
+    starts empty, and `/quit` discards it.
+    """
+    buf = session.tool_output_buffer
+    if not argv:
+        console.print(
+            "[yellow]Usage:[/yellow] /expand <id> | /expand last | /expand --list"
+        )
+        return ReplDirective.CONTINUE
+
+    if argv[0] in ("--list", "-l", "list"):
+        if not buf:
+            console.print("[dim]No tool calls captured yet in this session.[/dim]")
+            return ReplDirective.CONTINUE
+        table = Table(
+            title="Captured tool calls",
+            header_style="bold cyan",
+        )
+        table.add_column("tool_use_id", style="bold")
+        table.add_column("tool")
+        table.add_column("chars", justify="right")
+        table.add_column("status")
+        for tid, entry in buf.items():
+            short = tid if len(tid) <= 16 else tid[:12] + "…"
+            status = "[red]error[/red]" if entry.get("is_error") else "[green]ok[/green]"
+            table.add_row(
+                short,
+                entry.get("tool_name", "?"),
+                str(len(entry.get("payload", ""))),
+                status,
+            )
+        console.print(table)
+        return ReplDirective.CONTINUE
+
+    if argv[0] == "last":
+        if not buf:
+            console.print("[dim]No tool calls captured yet in this session.[/dim]")
+            return ReplDirective.CONTINUE
+        # Insertion-ordered dict — last key is the most recent capture.
+        target_id = next(reversed(buf))
+        _print_expanded(target_id, buf[target_id])
+        return ReplDirective.CONTINUE
+
+    # Prefix match — tool_use_ids can be long (Anthropic style), so allow
+    # the user to type just the first ~8 chars when unambiguous.
+    needle = argv[0]
+    matches = [tid for tid in buf if tid.startswith(needle)]
+    if not matches:
+        console.print(
+            f"[red]No tool call matching id[/red] [bold]{needle}[/bold]. "
+            f"Try [cyan]/expand --list[/cyan]."
+        )
+        return ReplDirective.CONTINUE
+    if len(matches) > 1:
+        console.print(
+            f"[yellow]Ambiguous prefix[/yellow] [bold]{needle}[/bold] matches "
+            f"{len(matches)} tool calls. Be more specific:"
+        )
+        for tid in matches:
+            console.print(f"  [cyan]{tid}[/cyan]  ({buf[tid].get('tool_name', '?')})")
+        return ReplDirective.CONTINUE
+
+    target_id = matches[0]
+    _print_expanded(target_id, buf[target_id])
+    return ReplDirective.CONTINUE
+
+
+def _print_expanded(tool_use_id: str, entry: dict) -> None:
+    """Render a single buffered tool result as a bordered block.
+
+    Keeps a visual frame so the expanded output is clearly demarcated from
+    the surrounding scrollback and from the next prompt.
+    """
+    tool_name = entry.get("tool_name", "?")
+    payload = entry.get("payload", "")
+    is_error = entry.get("is_error", False)
+    border = "red" if is_error else "cyan"
+    label = "error" if is_error else "output"
+    console.print(
+        f"\n[bold {border}]── /expand {tool_use_id}  "
+        f"{tool_name} {label} ({len(payload)} chars) ──[/bold {border}]"
+    )
+    # Print the raw payload as-is — no rich markup interpretation so file
+    # bodies / JSON can't smuggle markup that breaks the layout.
+    console.print(payload, markup=False, highlight=False)
+    console.print(f"[bold {border}]── end /expand ──[/bold {border}]\n")
+
+
 def cmd_verbose(session: ReplSession, argv: list[str]) -> ReplDirective:
     """Toggle DEBUG-level logging. /verbose on|off|toggle (default toggle)."""
     root = logging.getLogger()
@@ -352,6 +449,11 @@ _DEFINITIONS: list[SlashCommand] = [
         name="/mode",
         summary="Show or set operating mode. /mode | /mode plan|execution|general.",
         handler=cmd_mode,
+    ),
+    SlashCommand(
+        name="/expand",
+        summary="Reveal a collapsed tool output. /expand <id> | last | --list.",
+        handler=cmd_expand,
     ),
 ]
 

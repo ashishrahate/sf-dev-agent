@@ -78,6 +78,7 @@ def test_registry_has_expected_commands() -> None:
         "/help", "/quit", "/exit", "/clear", "/status",
         "/index", "/resume", "/tasks", "/memory",
         "/mock", "/provider", "/verbose", "/mode",
+        "/expand",
     }
     assert expected == set(SLASH_COMMANDS.keys())
 
@@ -654,3 +655,133 @@ def test_autosuggest_keeps_mode_on_no(
     monkeypatch.setattr("sf_dev_agent.repl.Prompt.ask", lambda *a, **k: "n")
     maybe_autosuggest_plan_mode(session, "deploy to sandbox")
     assert session.mode == AgentMode.EXECUTION
+
+
+# ---------------------------------------------------------------------------
+# /expand — v2 slice 3 collapsible blocks
+# ---------------------------------------------------------------------------
+
+def test_expand_no_arg_shows_usage(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session._dispatch("/expand")
+    assert "Usage" in capsys.readouterr().out
+
+
+def test_expand_list_empty_buffer(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session._dispatch("/expand --list")
+    assert "No tool calls captured" in capsys.readouterr().out
+
+
+def test_expand_list_populated(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session.tool_output_buffer["toolu_aa01"] = {
+        "tool_name": "code_search", "payload": "x" * 50, "is_error": False,
+    }
+    session.tool_output_buffer["toolu_bb02"] = {
+        "tool_name": "retrieve_context", "payload": "y" * 200, "is_error": True,
+    }
+    session._dispatch("/expand --list")
+    out = capsys.readouterr().out
+    assert "code_search" in out
+    assert "retrieve_context" in out
+    # Char counts surfaced.
+    assert "50" in out
+    assert "200" in out
+
+
+def test_expand_last_prints_most_recent(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Insertion-ordered dict — last inserted entry resolves /expand last."""
+    session.tool_output_buffer["toolu_first"] = {
+        "tool_name": "a", "payload": "first_payload", "is_error": False,
+    }
+    session.tool_output_buffer["toolu_second"] = {
+        "tool_name": "b", "payload": "second_payload_body", "is_error": False,
+    }
+    session._dispatch("/expand last")
+    out = capsys.readouterr().out
+    assert "second_payload_body" in out
+    assert "first_payload" not in out
+
+
+def test_expand_last_empty_buffer(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session._dispatch("/expand last")
+    assert "No tool calls captured" in capsys.readouterr().out
+
+
+def test_expand_full_id_match(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session.tool_output_buffer["toolu_xyz123"] = {
+        "tool_name": "code_search", "payload": "the full output here",
+        "is_error": False,
+    }
+    session._dispatch("/expand toolu_xyz123")
+    out = capsys.readouterr().out
+    assert "the full output here" in out
+    assert "code_search" in out
+
+
+def test_expand_prefix_match(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Prefix shorter than the full id works when unambiguous."""
+    session.tool_output_buffer["toolu_uniqueA"] = {
+        "tool_name": "x", "payload": "uniqueA_payload", "is_error": False,
+    }
+    session._dispatch("/expand toolu_unique")
+    out = capsys.readouterr().out
+    assert "uniqueA_payload" in out
+
+
+def test_expand_ambiguous_prefix(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session.tool_output_buffer["toolu_shared01"] = {
+        "tool_name": "a", "payload": "ignore me",
+        "is_error": False,
+    }
+    session.tool_output_buffer["toolu_shared02"] = {
+        "tool_name": "b", "payload": "also ignore",
+        "is_error": False,
+    }
+    session._dispatch("/expand toolu_shared")
+    out = capsys.readouterr().out
+    assert "Ambiguous" in out
+    # Both candidates listed.
+    assert "toolu_shared01" in out
+    assert "toolu_shared02" in out
+    # No payload leaked.
+    assert "ignore me" not in out
+    assert "also ignore" not in out
+
+
+def test_expand_no_match(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    session._dispatch("/expand nope_no_match")
+    out = capsys.readouterr().out
+    assert "No tool call matching" in out
+
+
+def test_expand_error_entry_colored_red(
+    session: ReplSession, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The /expand block uses a red border for errors so the user can tell
+    success from failure at a glance even when the payload is JSON."""
+    session.tool_output_buffer["toolu_errA"] = {
+        "tool_name": "code_search", "payload": "stack trace body",
+        "is_error": True,
+    }
+    session._dispatch("/expand toolu_errA")
+    out = capsys.readouterr().out
+    assert "stack trace body" in out
+    # The "error" label appears in the divider for error entries.
+    assert "error" in out

@@ -886,7 +886,7 @@ class AgentLoop:
             # Best-effort: never break the tool flow on a reindex error.
             self._auto_reindex_after_write(tool_name, tool_input, result)
 
-            render_tool_ok(tool_name, result_str)
+            render_tool_ok(tool_name, result_str, tool_use_id=tool_use_id)
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -894,7 +894,7 @@ class AgentLoop:
             }
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
-            render_tool_error(tool_name, error_msg)
+            render_tool_error(tool_name, error_msg, tool_use_id=tool_use_id)
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
