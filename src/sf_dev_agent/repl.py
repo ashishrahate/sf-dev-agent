@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
@@ -640,7 +641,12 @@ def _build_prompt_session(session: ReplSession) -> PromptSession:
     def _expand_last_output(event) -> None:  # pragma: no cover - prompt_toolkit interactive
         """Ctrl+O: print the most recent buffered tool output above the
         prompt (Claude-Code-style expand). No-op when nothing has been
-        captured yet."""
+        captured yet.
+
+        Uses `prompt_toolkit.application.run_in_terminal` (module-level
+        function) — older Application objects don't expose it as a
+        method, so importing the function directly is the portable form.
+        """
         def _do_render() -> None:
             entry = repl_ui.get_last_buffered_tool_output()
             if entry is None:
@@ -651,7 +657,7 @@ def _build_prompt_session(session: ReplSession) -> PromptSession:
             repl_ui.render_expanded_tool_output(entry)
 
         try:
-            event.app.run_in_terminal(_do_render)
+            run_in_terminal(_do_render)
         except Exception:
             logger.exception("Ctrl+O expand handler failed")
 
