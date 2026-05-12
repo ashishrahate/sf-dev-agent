@@ -150,3 +150,36 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_msgs_task_seq ON conversation_messages(task_id, seq);
+
+-- LLM call instrumentation (Item 2 — token audit per tool).
+-- One row per LLM call the agent issues. `triggered_by_tool` is the
+-- tool whose result fed into this turn (NULL for the very first turn of
+-- a task). `emitted_tools_json` is the JSON-encoded list of tool names
+-- the LLM emitted in response. Together they answer "what tokens were
+-- spent because tool X was in play". The CASCADE FK lets a deleted task
+-- take its invocation history with it.
+CREATE TABLE IF NOT EXISTS llm_invocations (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id           TEXT NOT NULL,
+    org_alias           TEXT,
+    task_id             TEXT NOT NULL,
+    turn_idx            INTEGER NOT NULL,           -- 0-indexed within the task
+    provider            TEXT NOT NULL,              -- gemini | anthropic | openai
+    model               TEXT NOT NULL,
+    input_tokens        INTEGER NOT NULL DEFAULT 0,
+    output_tokens       INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens   INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens  INTEGER NOT NULL DEFAULT 0,
+    triggered_by_tool   TEXT,                       -- name of tool whose result fed this call
+    emitted_tools_json  TEXT NOT NULL DEFAULT '[]', -- JSON array of tool names this call emitted
+    stop_reason         TEXT,
+    started_at          TEXT NOT NULL,              -- ISO-8601 UTC
+    duration_ms         INTEGER NOT NULL DEFAULT 0,
+    mode                TEXT,                       -- plan | execution | general
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_invocations_task     ON llm_invocations(task_id);
+CREATE INDEX IF NOT EXISTS idx_llm_invocations_started  ON llm_invocations(started_at);
+CREATE INDEX IF NOT EXISTS idx_llm_invocations_scope    ON llm_invocations(tenant_id, org_alias);
+CREATE INDEX IF NOT EXISTS idx_llm_invocations_tool     ON llm_invocations(triggered_by_tool);

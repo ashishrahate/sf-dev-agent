@@ -30,6 +30,7 @@ from sf_dev_agent.models.schemas import (
     Task,
     TaskStatus,
 )
+from sf_dev_agent.audit import LLMAuditStore, LLMInvocationRecord
 from sf_dev_agent.prompts import load_system_prompt
 from sf_dev_agent.providers.base import LLMProvider, consume_stream
 from sf_dev_agent.repl_ui import (
@@ -308,6 +309,16 @@ class AgentLoop:
         # value is the requested task_id; None means "no resume signal".
         self.resume_requested: str | None = None
 
+        # Token-usage audit (Item 2). Opens lazily on the first record
+        # write — keeps construction cheap and lets tests skip audit
+        # entirely by passing `audit_store=None` semantics implicitly.
+        # `_turn_idx` resets per task in run(). `_last_tools_run` captures
+        # the tool names that ran in the previous iteration so the next
+        # LLM call's row carries `triggered_by_tool` for attribution.
+        self._audit_store: LLMAuditStore | None = None
+        self._turn_idx: int = 0
+        self._last_tools_run: list[str] = []
+
         # Compute index-freshness once at construction. The REPL can refresh
         # the prompt later via /index or by recreating the AgentLoop.
         try:
@@ -342,6 +353,10 @@ class AgentLoop:
             tenant_id=self.org.tenant_id,
             user_request=user_request,
         )
+        # Reset per-task audit counters so a re-used AgentLoop instance
+        # doesn't carry turn indexes / tool attribution across tasks.
+        self._turn_idx = 0
+        self._last_tools_run = []
 
         # Persist the task row up-front and bind the conversation log to
         # this task_id. Persistence failures are best-effort — log and
@@ -473,6 +488,18 @@ class AgentLoop:
         self.conversation = ConversationLog(
             task_id=task_id, store=working_memory, seed=seeded,
         )
+
+        # Continue turn indexing where the prior run left off so resumed
+        # rows in `llm_invocations` don't collide on (task_id, turn_idx).
+        # Best-effort: a stale audit store doesn't block resume.
+        try:
+            store = self._get_audit_store()
+            if store is not None:
+                prior = store.list_for_task(task_id)
+                if prior:
+                    self._turn_idx = max(r.turn_idx for r in prior) + 1
+        except Exception:
+            logger.exception("Could not seed resume turn_idx from audit store")
 
         console.print(Panel(
             f"task_id: {task_id}\nstatus: {row.status}\n"
@@ -631,6 +658,61 @@ class AgentLoop:
             )
 
     # ------------------------------------------------------------------
+    # Token-usage audit (Item 2)
+    # ------------------------------------------------------------------
+
+    def _get_audit_store(self) -> LLMAuditStore | None:
+        """Lazily open the audit store. Returns None on open failure so the
+        agent loop continues working even if SQLite is unhappy."""
+        if self._audit_store is not None:
+            return self._audit_store
+        try:
+            from sf_dev_agent.context import default_db_path
+            self._audit_store = LLMAuditStore(default_db_path())
+        except Exception:
+            logger.exception("LLMAuditStore open failed — audit disabled for this run")
+            self._audit_store = None
+        return self._audit_store
+
+    def _record_llm_invocation(
+        self,
+        *,
+        started_at: str,
+        duration_ms: int,
+        response_usage: Any,
+        stop_reason: str,
+        emitted_tools: list[str],
+    ) -> None:
+        """Best-effort audit write — never raise into the agent loop."""
+        if self.current_task is None:
+            return
+        store = self._get_audit_store()
+        if store is None:
+            return
+        try:
+            from sf_dev_agent.providers.base import TokenUsage
+            usage = response_usage if isinstance(response_usage, TokenUsage) else TokenUsage()
+            store.record(LLMInvocationRecord(
+                tenant_id=self.org.tenant_id,
+                org_alias=self.org.org_alias,
+                task_id=self.current_task.task_id,
+                turn_idx=self._turn_idx,
+                provider=self.provider.__class__.__name__,
+                model=self.provider.model_name,
+                usage=usage,
+                triggered_by_tool=(
+                    self._last_tools_run[0] if self._last_tools_run else None
+                ),
+                emitted_tools=list(emitted_tools),
+                stop_reason=stop_reason,
+                started_at=started_at,
+                duration_ms=duration_ms,
+                mode=self.mode.value,
+            ))
+        except Exception:
+            logger.exception("LLM audit record failed (continuing)")
+
+    # ------------------------------------------------------------------
     # Agent loop (ReAct)
     # ------------------------------------------------------------------
 
@@ -653,6 +735,12 @@ class AgentLoop:
         with InterruptListener() as interrupt:
             for iteration in range(self.max_iterations):
                 logger.info("Agent loop iteration %d (phase=%s)", iteration + 1, phase)
+
+                # Capture wall-clock around the LLM call only — token
+                # accounting and timing should reflect provider latency,
+                # not anything we did after the response landed.
+                call_started_at = datetime.now(UTC).isoformat()
+                call_started_perf = datetime.now(UTC)
 
                 try:
                     chunks = self.provider.chat_stream(
@@ -683,6 +771,10 @@ class AgentLoop:
                     self._handle_interrupt(phase)
                     return
 
+                duration_ms = int(
+                    (datetime.now(UTC) - call_started_perf).total_seconds() * 1000
+                )
+
                 # Rebuild assistant content blocks in internal format.
                 assistant_content: list[dict[str, Any]] = []
                 tool_calls: list[dict[str, Any]] = []
@@ -700,6 +792,23 @@ class AgentLoop:
                     tool_calls.append({"id": tc.id, "name": tc.name, "input": tc.input})
 
                 self.conversation.append({"role": "assistant", "content": assistant_content})
+
+                # Item 2 — persist this LLM call's token usage + provenance.
+                # Done AFTER conversation append + content rebuild so any
+                # exception in the audit path can't desync state.
+                emitted_tool_names = [tc.name for tc in response.tool_calls]
+                self._record_llm_invocation(
+                    started_at=call_started_at,
+                    duration_ms=duration_ms,
+                    response_usage=response.usage,
+                    stop_reason=response.stop_reason,
+                    emitted_tools=emitted_tool_names,
+                )
+                self._turn_idx += 1
+                # `_last_tools_run` informs the NEXT iteration's
+                # `triggered_by_tool` attribution. Updated below once
+                # tools have actually run (failure to dispatch shouldn't
+                # claim a tool was the trigger of the following turn).
 
                 if not tool_calls:
                     logger.info("Agent completed %s phase (no more tool calls)", phase)
@@ -725,6 +834,9 @@ class AgentLoop:
                     self._handle_interrupt(phase)
                     return
                 self.conversation.append({"role": "user", "content": tool_results})
+                # Tools have run — record what executed so the next LLM
+                # call's audit row attributes its token spend.
+                self._last_tools_run = [call["name"] for call in tool_calls]
 
                 # Resume hand-off: if the LLM called request_resume, end
                 # this run after the confirmation tool_result is recorded.

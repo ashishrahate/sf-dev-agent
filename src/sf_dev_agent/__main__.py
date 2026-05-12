@@ -121,6 +121,11 @@ def main() -> None:
         from sf_dev_agent.resume_cli import run_resume_command
         sys.exit(run_resume_command(sys.argv[2:]))
 
+    # Special-case the audit subcommand — LLM token usage reports.
+    if len(sys.argv) >= 2 and sys.argv[1] == "audit":
+        from sf_dev_agent.audit_cli import run_audit_command
+        sys.exit(run_audit_command(sys.argv[2:]))
+
     args = parse_args()
 
     logging.basicConfig(

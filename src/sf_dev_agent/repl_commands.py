@@ -264,6 +264,36 @@ def cmd_mode(session: ReplSession, argv: list[str]) -> ReplDirective:
     return ReplDirective.CONTINUE
 
 
+def cmd_tokens(session: ReplSession, argv: list[str]) -> ReplDirective:
+    """Show token usage for the current session/task.
+
+    Usage:
+      /tokens                   — summary for the current scope.
+      /tokens --by tool         — aggregate by triggering tool.
+      /tokens --task <id>       — every turn of one task.
+
+    Delegates to `sf-agent audit tokens` so the views are identical to
+    the one-shot CLI. Filters default to the active session scope
+    (tenant + org) so you see this REPL's spend, not the whole machine's.
+    """
+    from sf_dev_agent.audit_cli import run_audit_command
+
+    # Default scope is the session's (tenant, org). User can override by
+    # passing --tenant / --org explicitly.
+    forwarded = ["tokens"]
+    if not any(a in ("--tenant",) for a in argv):
+        forwarded += ["--tenant", session.org.tenant_id]
+    if not any(a in ("--org",) for a in argv):
+        forwarded += ["--org", session.org.org_alias]
+    forwarded.extend(argv)
+    try:
+        run_audit_command(forwarded)
+    except SystemExit:
+        # argparse calls sys.exit on bad args — catch so the REPL survives.
+        pass
+    return ReplDirective.CONTINUE
+
+
 def cmd_expand(session: ReplSession, argv: list[str]) -> ReplDirective:
     """Reveal the full output of a previously-collapsed tool call.
 
@@ -454,6 +484,11 @@ _DEFINITIONS: list[SlashCommand] = [
         name="/expand",
         summary="Reveal a collapsed tool output. /expand <id> | last | --list.",
         handler=cmd_expand,
+    ),
+    SlashCommand(
+        name="/tokens",
+        summary="LLM token usage for this scope. /tokens [--by tool|model] [--task <id>] [--since 7d].",
+        handler=cmd_tokens,
     ),
 ]
 

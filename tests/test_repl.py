@@ -78,7 +78,7 @@ def test_registry_has_expected_commands() -> None:
         "/help", "/quit", "/exit", "/clear", "/status",
         "/index", "/resume", "/tasks", "/memory",
         "/mock", "/provider", "/verbose", "/mode",
-        "/expand",
+        "/expand", "/tokens",
     }
     assert expected == set(SLASH_COMMANDS.keys())
 
@@ -785,3 +785,64 @@ def test_expand_error_entry_colored_red(
     assert "stack trace body" in out
     # The "error" label appears in the divider for error entries.
     assert "error" in out
+
+
+# ---------------------------------------------------------------------------
+# /tokens — Item 2 audit views from the REPL
+# ---------------------------------------------------------------------------
+
+def test_tokens_delegates_to_audit_cli(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The /tokens slash command forwards to `run_audit_command` and threads
+    the session's (tenant, org) scope through as default filters."""
+    captured: list[list[str]] = []
+
+    def fake_run(argv: list[str]) -> int:
+        captured.append(list(argv))
+        return 0
+
+    monkeypatch.setattr("sf_dev_agent.audit_cli.run_audit_command", fake_run)
+    session._dispatch("/tokens --by tool")
+    assert len(captured) == 1
+    argv = captured[0]
+    # Forwarded first arg is the verb.
+    assert argv[0] == "tokens"
+    # Session scope defaulted in when not explicit.
+    assert "--tenant" in argv
+    assert argv[argv.index("--tenant") + 1] == session.org.tenant_id
+    assert "--org" in argv
+    assert argv[argv.index("--org") + 1] == session.org.org_alias
+    # User-supplied flags preserved.
+    assert "--by" in argv
+    assert argv[argv.index("--by") + 1] == "tool"
+
+
+def test_tokens_respects_explicit_tenant_override(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User-supplied --tenant beats the auto-injected session default."""
+    captured: list[list[str]] = []
+
+    def fake_run(argv: list[str]) -> int:
+        captured.append(list(argv))
+        return 0
+
+    monkeypatch.setattr("sf_dev_agent.audit_cli.run_audit_command", fake_run)
+    session._dispatch("/tokens --tenant explicit-tenant")
+    argv = captured[0]
+    # Auto-inject suppressed; the explicit value rides through.
+    assert argv.count("--tenant") == 1
+    assert argv[argv.index("--tenant") + 1] == "explicit-tenant"
+
+
+def test_tokens_systemexit_kept_in_repl(
+    session: ReplSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SystemExit from argparse (bad args) doesn't kill the REPL."""
+    def boom(argv: list[str]) -> int:
+        raise SystemExit(2)
+
+    monkeypatch.setattr("sf_dev_agent.audit_cli.run_audit_command", boom)
+    directive = session._dispatch("/tokens --garbage")
+    assert directive == ReplDirective.CONTINUE
