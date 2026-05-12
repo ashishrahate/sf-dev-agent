@@ -128,10 +128,21 @@ def main() -> None:
 
     args = parse_args()
 
+    # Default log level: WARNING. The agent and providers emit INFO
+    # lines for every loop iteration / HTTP request — useful for
+    # debugging but noisy in the REPL where the user sees them mixed
+    # with tool rendering. `--verbose` and the in-REPL `/verbose on`
+    # both raise to DEBUG. Third-party loggers (httpx etc.) get the
+    # same default and are independently quieted below.
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # httpx defaults to INFO on every HTTP call — pin it to WARNING so
+    # `sf-agent --verbose` only floods on actual debug runs.
+    if not args.verbose:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     if not args.org_alias:
         console.print(

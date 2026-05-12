@@ -98,8 +98,8 @@ class ReplSession:
         self.completed_task_ids: list[str] = []
         # v2 slice 3 — captured tool outputs keyed by tool_use_id.
         # Populated by repl_ui via `set_tool_output_buffer`; inspected
-        # by /expand. Insertion order preserved so "/expand last"
-        # resolves to the most recent tool call.
+        # by the Ctrl+O keybind. Insertion order preserved so the
+        # latest entry is the one Ctrl+O resolves.
         self.tool_output_buffer: dict[str, dict[str, Any]] = {}
         # Slice 1 — long-lived AgentLoop owned by this REPL session.
         # Lazy-init on first dispatch. Rebuilt only if a setting that
@@ -636,6 +636,25 @@ def _build_prompt_session(session: ReplSession) -> PromptSession:
         except Exception:
             logger.exception("Shift+Tab redraw invalidate failed")
 
+    @bindings.add("c-o")
+    def _expand_last_output(event) -> None:  # pragma: no cover - prompt_toolkit interactive
+        """Ctrl+O: print the most recent buffered tool output above the
+        prompt (Claude-Code-style expand). No-op when nothing has been
+        captured yet."""
+        def _do_render() -> None:
+            entry = repl_ui.get_last_buffered_tool_output()
+            if entry is None:
+                console.print(
+                    "[dim]No tool output captured yet in this session.[/dim]"
+                )
+                return
+            repl_ui.render_expanded_tool_output(entry)
+
+        try:
+            event.app.run_in_terminal(_do_render)
+        except Exception:
+            logger.exception("Ctrl+O expand handler failed")
+
     return PromptSession(
         message="❯ ",
         history=FileHistory(str(_history_path())),
@@ -768,7 +787,7 @@ def launch_repl(
     pt_session = _build_prompt_session(session)
 
     # v2 slice 3 — register the session's tool-output buffer so repl_ui
-    # can capture every tool result for `/expand <id>` recall. Detached
+    # can capture every tool result for Ctrl+O recall. Detached
     # at session end so a one-shot CLI invocation that imports this
     # module never sees stale capture state.
     repl_ui.set_tool_output_buffer(session.tool_output_buffer)

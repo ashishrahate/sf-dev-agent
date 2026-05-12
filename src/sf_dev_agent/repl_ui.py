@@ -13,8 +13,8 @@ agent loop doesn't sprinkle ad-hoc `console.print` calls. Goals:
 v2 — landing in slices:
 - Slice 1 ✅ Inline diffs for `file_write` (this module's `render_file_write_diff`).
 - Slice 2 (deferred): syntax highlighting for code-shaped tool results.
-- Slice 3 ✅ Collapsible / expandable tool blocks via tool_use_id capture
-  (head-N-lines preview + /expand <id> recovers the full payload).
+- Slice 3 ✅ Collapsible tool blocks: head-N-lines preview inline + the
+  most-recent full payload expandable via Ctrl+O in the REPL.
 """
 
 from __future__ import annotations
@@ -36,10 +36,10 @@ _console: Console = Console()
 #
 # `_TOOL_OUTPUT_BUFFER` is set by the REPL session at launch and cleared on
 # exit. While set, `render_tool_ok` / `render_tool_error` insert each tool
-# result so `/expand <id>` can recover the full payload later. Insertion
-# order is preserved so `/expand last` resolves to the most recent call.
-# When the buffer is None (one-shot CLI runs, tests that don't opt in), the
-# render path is unchanged.
+# result so the Ctrl+O keybind can render the most recent full payload.
+# Insertion order is preserved — `get_last_buffered_tool_output()` reads
+# the latest entry. When the buffer is None (one-shot CLI runs, tests that
+# don't opt in), the render path is unchanged.
 _TOOL_OUTPUT_BUFFER: dict[str, dict[str, Any]] | None = None
 
 # How many head lines of a long tool result to preview inline before the
@@ -55,7 +55,7 @@ except ValueError:
 
 # Tools whose results never get the preview-and-hint treatment. submit_plan
 # renders its plan elsewhere; we don't want to double-render or confuse the
-# user with a `/expand` hint they'd never use.
+# user with a Ctrl+O hint they'd never use.
 _NO_PREVIEW_TOOLS: frozenset[str] = frozenset({"submit_plan"})
 
 
@@ -66,7 +66,7 @@ def set_console_for_tests(console: Console) -> None:
 
 
 def set_tool_output_buffer(buf: dict[str, dict[str, Any]] | None) -> None:
-    """Register a session-scoped buffer for `/expand` recall.
+    """Register a session-scoped buffer for Ctrl+O expand recall.
 
     Pass a dict (preserves insertion order in Python 3.7+) to opt in; pass
     `None` to detach. Caller owns the buffer's lifetime — the REPL clears
@@ -160,8 +160,8 @@ def render_tool_ok(
 
     When a REPL session has registered a tool-output buffer AND a
     `tool_use_id` is supplied, the full result is stored for later
-    `/expand <id>` recall. For long results, a head-N-lines preview is
-    printed under the success line with a hint pointing at `/expand`.
+    Ctrl+O expand recall. For long results, a head-N-lines preview is
+    printed under the success line with a hint pointing at Ctrl+O.
     """
     _console.print(
         f"[green]└ ✓[/green] [dim]{tool_name} → {len(result_str)} chars[/dim]"
@@ -177,16 +177,18 @@ def render_tool_error(
     """Error line. Truncated to keep one tool's failure from eating the screen.
 
     Like the success path, the full error is captured into the session
-    buffer (if one is registered) so `/expand <id>` can recover the
-    untrimmed text — useful for debugging failures where the truncated
-    surface drops the stack trace.
+    buffer (if one is registered) so Ctrl+O can recover the untrimmed
+    text — useful for debugging failures where the truncated surface
+    drops the stack trace. Note: only the MOST RECENT buffered output
+    is reachable via Ctrl+O; if a tool error is followed by a
+    successful tool call, the error is no longer accessible.
     """
     _console.print(
         f"[red]└ ✗[/red] [bold red]{tool_name}[/bold red] "
         f"[red]{_truncate(error_msg, 200)}[/red]"
     )
     # Errors get captured but never preview-rendered — the truncated
-    # one-liner above is already visible; `/expand` reveals the rest.
+    # one-liner above is already visible; Ctrl+O reveals the rest.
     _maybe_buffer_and_preview(tool_name, error_msg, tool_use_id, is_error=True)
 
 
@@ -202,8 +204,8 @@ def _maybe_buffer_and_preview(
 
     Errors are stored but not previewed — the truncated render_tool_error
     line is already visible to the user, and a multi-line stack trace
-    would defeat the point of the truncation. `/expand <id>` still
-    recovers the full text.
+    would defeat the point of the truncation. Ctrl+O still recovers
+    the full text while it's the most recent buffered entry.
     """
     if _TOOL_OUTPUT_BUFFER is None or not tool_use_id:
         return
@@ -221,10 +223,8 @@ def _maybe_buffer_and_preview(
     if len(lines) <= _COLLAPSE_LINES_THRESHOLD:
         return
 
-    # Show first N lines under the success line, then a hint with the
-    # tool_use_id (or its 12-char prefix when very long) so the user can
-    # `/expand` to see the rest.
-    short_id = tool_use_id if len(tool_use_id) <= 16 else tool_use_id[:12]
+    # Show first N lines under the success line, then a hint pointing at
+    # Ctrl+O (which expands the most recent buffered tool output).
     for line in lines[:_COLLAPSE_LINES_THRESHOLD]:
         _console.print(Text("│ ", style="cyan") + Text(line, style="dim"))
     remaining = len(lines) - _COLLAPSE_LINES_THRESHOLD
@@ -232,10 +232,42 @@ def _maybe_buffer_and_preview(
         Text("│ ", style="cyan")
         + Text(
             f"… {remaining} more line{'s' if remaining != 1 else ''} "
-            f"— /expand {short_id}",
+            f"— press Ctrl+O to expand",
             style="dim italic",
         )
     )
+
+
+def render_expanded_tool_output(entry: dict[str, Any]) -> None:
+    """Render a buffered tool result as a bordered block.
+
+    Called by the Ctrl+O key binding in `repl.py` to print the most
+    recent captured tool output (via `_TOOL_OUTPUT_BUFFER`). The frame
+    visually delimits the expanded payload from the surrounding
+    scrollback and the next prompt.
+    """
+    tool_name = entry.get("tool_name", "?")
+    payload = entry.get("payload", "")
+    is_error = entry.get("is_error", False)
+    border = "red" if is_error else "cyan"
+    label = "error" if is_error else "output"
+    _console.print(
+        f"\n[bold {border}]── expand  "
+        f"{tool_name} {label} ({len(payload)} chars) ──[/bold {border}]"
+    )
+    # Raw payload — no rich markup interpretation so file bodies / JSON
+    # can't smuggle markup that breaks the layout.
+    _console.print(payload, markup=False, highlight=False)
+    _console.print(f"[bold {border}]── end expand ──[/bold {border}]\n")
+
+
+def get_last_buffered_tool_output() -> dict[str, Any] | None:
+    """Return the most recently captured tool output, or None if the
+    buffer is empty / unregistered. Used by the Ctrl+O key binding."""
+    if not _TOOL_OUTPUT_BUFFER:
+        return None
+    last_key = next(reversed(_TOOL_OUTPUT_BUFFER))
+    return _TOOL_OUTPUT_BUFFER[last_key]
 
 
 def render_tool_blocked(tool_name: str, reason: str) -> None:
@@ -386,6 +418,8 @@ __all__ = [
     "format_tool_input_summary",
     "get_collapse_lines_threshold",
     "get_console",
+    "get_last_buffered_tool_output",
+    "render_expanded_tool_output",
     "render_file_write_diff",
     "render_reindex_summary",
     "render_streaming_text",
