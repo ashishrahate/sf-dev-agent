@@ -184,3 +184,12 @@ CREATE INDEX IF NOT EXISTS idx_llm_invocations_task     ON llm_invocations(task_
 CREATE INDEX IF NOT EXISTS idx_llm_invocations_started  ON llm_invocations(started_at);
 CREATE INDEX IF NOT EXISTS idx_llm_invocations_scope    ON llm_invocations(tenant_id, org_alias);
 CREATE INDEX IF NOT EXISTS idx_llm_invocations_tool     ON llm_invocations(triggered_by_tool);
+
+-- Which embedder produced the stored vectors (single row). Guards against
+-- mixing models/dimensions in one DB; see embedder_guard.py.
+CREATE TABLE IF NOT EXISTS embedder_meta (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    name    TEXT NOT NULL,
+    dim     INTEGER NOT NULL,
+    set_at  TEXT NOT NULL
+);

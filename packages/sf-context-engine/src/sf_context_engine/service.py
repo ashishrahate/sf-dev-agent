@@ -41,6 +41,24 @@ class ContextService:
         from sf_context_engine import default_db_path
         return default_db_path()
 
+    def _claim_embedder(self, embedder: Any, reset: bool = False) -> dict[str, Any] | None:
+        """Record `embedder` as this DB's embedder; return an error dict on mismatch."""
+        from sf_context_engine import embedder_guard
+
+        db_path = self._resolve_index_db_path()
+        try:
+            embedder_guard.claim(db_path, embedder, reset=reset)
+        except embedder_guard.EmbedderMismatch:
+            return embedder_guard.check(db_path, embedder).to_error()
+        return None
+
+    def _check_embedder(self, embedder: Any) -> dict[str, Any] | None:
+        """Error dict if `embedder` differs from the one that built the DB, else None."""
+        from sf_context_engine import embedder_guard
+
+        status = embedder_guard.check(self._resolve_index_db_path(), embedder)
+        return status.to_error() if status.mismatch else None
+
     def _index_missing_response(self, db_path: Path) -> dict[str, Any]:
         return {
             "error": (
@@ -234,8 +252,13 @@ class ContextService:
         self,
         component_types: list[str] | None = None,
         force: bool = False,
+        reset_embeddings: bool = False,
     ) -> dict[str, Any]:
-        """Populate/refresh embeddings for indexed components."""
+        """Populate/refresh embeddings for indexed components.
+
+        reset_embeddings=True discards every stored vector first; use after
+        switching embedder (the guard refuses to mix models otherwise).
+        """
         from sf_context_engine import MetadataIndex, create_embedder
 
         db_path = self._resolve_index_db_path()
@@ -246,6 +269,10 @@ class ContextService:
             embedder = create_embedder()
         except (ValueError, ImportError) as exc:
             return {"error": f"Could not initialize embedder: {exc}"}
+
+        err = self._claim_embedder(embedder, reset=reset_embeddings)
+        if err:
+            return err
 
         with MetadataIndex(db_path) as index:
             try:
@@ -271,6 +298,7 @@ class ContextService:
         self,
         category: str | None = None,
         force: bool = False,
+        reset_embeddings: bool = False,
     ) -> dict[str, Any]:
         """Auto-load bundled entries (if needed) and refresh embeddings."""
         from sf_context_engine import KnowledgeBase, create_embedder
@@ -281,6 +309,9 @@ class ContextService:
             return {"error": f"Could not initialize embedder: {exc}"}
 
         db_path = self._resolve_index_db_path()
+        err = self._claim_embedder(embedder, reset=reset_embeddings)
+        if err:
+            return err
         with KnowledgeBase(db_path) as kb:
             ingest = kb.auto_load_if_empty()
             try:
@@ -330,6 +361,9 @@ class ContextService:
             return {"error": f"Embedding the query failed: {type(exc).__name__}: {exc}"}
 
         db_path = self._resolve_index_db_path()
+        err = self._check_embedder(embedder)
+        if err:
+            return err
         with KnowledgeBase(db_path) as kb:
             kb.auto_load_if_empty()
             hits = kb.search(
@@ -381,6 +415,29 @@ class ContextService:
             ],
         }
 
+    def _embed_pending_memories(self, store: Any) -> tuple[bool, str]:
+        """Best-effort embed of unembedded memories; returns (embedded, note)."""
+        import logging
+
+        from sf_context_engine import create_embedder
+
+        try:
+            embedder = create_embedder()
+            err = self._claim_embedder(embedder)
+            if err:
+                return False, (
+                    "Saved, but not embedded: " + str(err["detail"]) + ". Recall will "
+                    "not return it until embeddings are reset to the active embedder."
+                )
+            store.embed_pending(embedder)
+            return True, "Saved and embedded; immediately recallable."
+        except Exception as exc:  # embedding must never lose the memory
+            logging.getLogger(__name__).warning("memory embed failed: %s", exc)
+            return False, (
+                f"Saved, but embedding failed ({type(exc).__name__}: {exc}). "
+                "It will not be recallable until embedded."
+            )
+
     def memory_save(
         self,
         type: str,
@@ -392,11 +449,10 @@ class ContextService:
     ) -> dict[str, Any]:
         """Persist a memory row, scoped to the current (tenant, org).
 
-        Embedding happens lazily — `memory_recall` does not auto-embed; the
-        first explicit recall after a save will only see this row if
-        `embed_memories` (or the orchestrator's batch embed) has run. This
-        mirrors the metadata-index / knowledge-base separation between
-        ingestion and embedding.
+        The new row is embedded right after saving (best effort) so it is
+        immediately recallable. If no embedder is usable, or the embedder
+        differs from the one that built the DB, the row is saved unembedded
+        and `embedded` is False in the result.
         """
         from sf_context_engine.memory import MemoryStore
 
@@ -413,22 +469,20 @@ class ContextService:
                     body=body,
                     tags=tags or [],
                 )
+                embedded, embed_note = self._embed_pending_memories(store)
         except ValueError as exc:
             return {"error": str(exc)}
 
         return {
             "saved": True,
+            "embedded": embedded,
             "id": record.id,
             "type": record.type,
             "name": record.name,
             "tenant_id": record.tenant_id,
             "org_alias": record.org_alias,
             "created_at": record.created_at,
-            "note": (
-                "Embedding is lazy — recall will not return this row until "
-                "embeddings are refreshed. Run embed_memories or rely on the "
-                "orchestrator's batch embed."
-            ),
+            "note": embed_note,
         }
 
     def memory_recall(
@@ -459,6 +513,10 @@ class ContextService:
 
         db_path = self._resolve_index_db_path()
         scope = self._memory_scope()
+
+        err = self._check_embedder(embedder)
+        if err:
+            return err
 
         try:
             with MemoryStore(db_path) as store:
@@ -699,6 +757,15 @@ class ContextService:
         if not db_path.exists():
             return self._index_missing_response(db_path)
 
+        try:
+            from sf_context_engine import create_embedder
+
+            err = self._check_embedder(create_embedder())
+        except (ValueError, ImportError):
+            err = None  # no usable embedder: layers degrade as before
+        if err:
+            return err
+
         result = retrieve_context(
             query=query,
             db_path=db_path,
@@ -746,6 +813,10 @@ class ContextService:
             query_vec = embedder.embed_one(query)
         except Exception as exc:
             return {"error": f"Embedding the query failed: {type(exc).__name__}: {exc}"}
+
+        err = self._check_embedder(embedder)
+        if err:
+            return err
 
         with MetadataIndex(db_path) as index:
             hits = index.semantic_search(
@@ -800,6 +871,12 @@ class ContextService:
             embedder = create_embedder()
             out["embedder"] = embedder.name
             out["embedder_is_mock"] = embedder.name.startswith("mock")
+            from sf_context_engine import embedder_guard
+
+            guard = embedder_guard.check(db_path, embedder)
+            out["embedder_state"] = guard.state
+            if guard.mismatch:
+                out["embedder_mismatch"] = guard.to_error()
             if out["embedder_is_mock"]:
                 out["warning"] = (
                     "No GOOGLE_API_KEY set: semantic_search, knowledge_search and "

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import os
 import shutil
 import sys
@@ -85,7 +86,7 @@ def build_server(service: ContextService) -> FastMCP:
     @mcp.tool(annotations=_READ_ONLY)
     def retrieve_context(
         query: str,
-        max_tokens: int = 4000,
+        max_tokens: int = 2500,
         max_per_layer: int = 6,
         component_type: str | None = None,
         knowledge_category: str | None = None,
@@ -94,7 +95,7 @@ def build_server(service: ContextService) -> FastMCP:
         """Default entry point. One call searches the org's indexed code, the
         best-practice knowledge base and saved project memory, merges and
         de-duplicates the hits, adds 1-hop dependency neighbours for the top
-        results, and trims to max_tokens. Use it first for questions like "how is
+        results, and trims to max_tokens (default 2500; raise only if needed). Use it first for questions like "how is
         Account validated?" or "what handles order creation?". Optional filters:
         component_type (e.g. ApexClass), knowledge_category (anti_patterns,
         best_practices, governor_limits, patterns), memory_type (user, feedback,
@@ -116,7 +117,12 @@ def build_server(service: ContextService) -> FastMCP:
         """Exact substring search over the indexed metadata (names and source).
         Use for known identifiers (class, trigger, field or object names). Set
         include_source=true to get code (trimmed to ~80 lines per hit unless
-        source_max_lines is set; 0 = untrimmed)."""
+        source_max_lines is set; 0 = untrimmed). With include_source, results are
+        capped at 10 hits and 40 lines each unless you override source_max_lines."""
+        if include_source:
+            limit = min(limit, 10)
+            if source_max_lines is None:
+                source_max_lines = 40
         return service.code_search(
             query=query, component_type=component_type, include_source=include_source,
             limit=limit, source_max_lines=source_max_lines,
@@ -208,25 +214,33 @@ def build_server(service: ContextService) -> FastMCP:
         ctx: Context,
         component_types: list[str] | None = None,
         force: bool = False,
+        reset_embeddings: bool = False,
     ) -> dict[str, Any]:
         """Compute embeddings for indexed components so semantic_search works.
-        Skips unchanged components. Needs GOOGLE_API_KEY; otherwise a mock
-        embedder is used."""
+        Skips unchanged components. Uses the embedder reported by index_status
+        (local fastembed by default; set SF_CONTEXT_EMBEDDER to change). If the
+        embedder changed since the index was built, this refuses with
+        embedder_mismatch; pass reset_embeddings=true to discard old vectors and
+        recompute them."""
         return await _run_with_heartbeat(
             ctx, "Embedding components", service.embed_metadata_index,
             component_types=component_types, force=force,
+            reset_embeddings=reset_embeddings,
         )
 
     @mcp.tool(annotations=_LOCAL_WRITE)
     async def embed_knowledge_base(
-        ctx: Context, category: str | None = None, force: bool = False,
+        ctx: Context,
+        category: str | None = None,
+        force: bool = False,
+        reset_embeddings: bool = False,
     ) -> dict[str, Any]:
         """Load the bundled best-practice entries and embed them so
         knowledge_search and retrieve_context can use them. Run once after
         install."""
         return await _run_with_heartbeat(
             ctx, "Embedding knowledge base", service.embed_knowledge_base,
-            category=category, force=force,
+            category=category, force=force, reset_embeddings=reset_embeddings,
         )
 
     # ----------------------------------------------------------------- memory
@@ -285,7 +299,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="SQLite path (env: SF_CONTEXT_DB; "
                         "default: <SF_CONTEXT_HOME>/metadata_index.db)")
     p.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
+    p.add_argument("--warmup", action="store_true",
+                   help="Download/load the embedding model, then exit")
     return p.parse_args(argv)
+
+
+def _warmup() -> int:
+    """Pre-download the embedding model so the first MCP call doesn't stall."""
+    from sf_context_engine import create_embedder
+
+    try:
+        embedder = create_embedder()
+        warm = getattr(embedder, "warmup", None)
+        if warm is not None:
+            print(f"Downloading/loading {embedder.name} ...", file=sys.stderr)
+            warm()
+        print(f"Embedder ready: {embedder.name} ({embedder.dim}-d)", file=sys.stderr)
+        return 0
+    except (ValueError, ImportError) as exc:
+        print(f"sf-context-mcp: embedder unavailable: {exc}", file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -295,6 +328,13 @@ def main(argv: list[str] | None = None) -> None:
     except ImportError:
         pass
     args = _parse_args(argv)
+    # Private-by-default: use the local embedder when available instead of
+    # sending org code to a hosted API just because a key happens to be in env.
+    # Set SF_CONTEXT_EMBEDDER explicitly (e.g. "gemini") to override.
+    if importlib.util.find_spec("fastembed") is not None:
+        os.environ.setdefault("SF_CONTEXT_EMBEDDER", "fastembed")
+    if args.warmup:
+        raise SystemExit(_warmup())
     if not args.org:
         print("sf-context-mcp: --org (or SF_ORG_ALIAS) is required", file=sys.stderr)
         raise SystemExit(2)

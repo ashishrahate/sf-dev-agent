@@ -33,9 +33,10 @@ def scope() -> MemoryScope:
 # Default location
 # ---------------------------------------------------------------------------
 
-def test_default_export_dir_is_under_cache() -> None:
-    """The default export dir lives under .cache so it's not git-tracked."""
-    assert default_export_dir().parts[-3:] == (".cache", "memory", "exports")
+def test_default_export_dir_is_under_state_dir(monkeypatch, tmp_path) -> None:
+    """The default export dir lives under SF_CONTEXT_HOME, never inside a repo checkout."""
+    monkeypatch.setenv("SF_CONTEXT_HOME", str(tmp_path))
+    assert default_export_dir() == tmp_path / "memory" / "exports"
 
 
 # ---------------------------------------------------------------------------
