@@ -451,3 +451,47 @@ Files: `src/sf_dev_agent/extract_nudge.py`, `repl.py`, `tests/test_extract_nudge
 - Containerization / auth (control + execution plane work).
 - Per-task extract nudge (replaced by `/quit` variant).
 - Tab completion of memory/task IDs.
+
+---
+
+# Addendum — 2026-10-06: MVP-hardening discussion (design only, nothing built)
+
+Captured from a planning discussion aimed at a demoable MVP. Findings come from reading the code, not from reproducing the failures. Revisit before implementing.
+
+## Findings
+
+- **Memory loss root cause:** the conversation is owned by the task. `AgentLoop.run()` (`agent.py:563`) creates a new `Task` and a new `ConversationLog` on every call. After a plan is approved or rejected the task is terminal, so the next REPL message starts with an empty transcript.
+- **Yes/no misbehaviour (inferred, unconfirmed):** three paths handle approval tokens (`drive_approval_loop`, the REPL's `_dispatch_agent` routing, and `AgentLoop.prompt()`). If the agent asks a question in prose instead of via `request_user_input`, a bare "yes" is routed as a new task with no context and hits the `_looks_like_stray_approval` safety net.
+- **System prompt:** 679 lines. About half (`## Tools`, from line ~341) duplicates the tool schemas already sent to the provider.
+- **Caching gaps:** `{{TIMESTAMP}}` and `{{INDEX_FRESHNESS}}` live inside the system prompt and break the cached prefix. No cache breakpoint on the conversation. Anthropic `cache_control` exists for the system prompt and last tool only.
+- **Workspace coupling:** `paths.agent_workspace()` anchors `file_write` / `file_read` / `bash`, the `sf` CLI `cwd`, path-traversal safety, the `sourceApiVersion` lookup, diff capture and auto-reindex.
+- **Providers:** `OpenAIProvider` has no `base_url`. Embeddings are Gemini-only (3072-d).
+
+## Planned items
+
+1. **Ollama provider (~0.5 day).** New `providers/ollama_provider.py` on the native `/api/chat` API (to set `options.num_ctx`), `[ollama]` extra, `LLM_PROVIDER=ollama` + `OLLAMA_HOST` + `LLM_MODEL`, and a `context_window` property on `LLMProvider`. Ollama's default context is small (~4K) and silently drops the oldest content including the system prompt, so set `num_ctx` explicitly (8-16K+). Check whether the "forgot" symptom came from a local-model run.
+2. **Session-level conversation + yes/no cleanup.** Add a session above the task. The REPL owns one transcript keyed by `session_id` and tasks become plan state machines inside it. Record plan rejection in the transcript. Make `request_user_input` the only way the agent asks questions. Remove the stray-approval heuristic. Summarise old turns past a token budget (read from `context_window`). Add regression tests for approve / reject / follow-up keeps context.
+3. **Prompt shrink + tool pruning.** Delete the Tools section and move tool-choice guidance into tool descriptions. Move Salesforce rules to the knowledge base. Keep ~60 lines (identity, approval rules, condensed never-do list, env block), inject only the current mode's block, target ~1.5-2K tokens. Add a "lite" tool profile of ~8-10 tools for local models. Return an explicit "invalid tool arguments" error instead of silently substituting `{}` on JSON parse failure.
+4. **Doctor as a tool, not an install gate.** Remove the gate at `setup_wizard.py:281`. Ship via `uv tool install` / `pipx`. Check for the `sf` CLI lazily and return a structured error such as `{"error": "sf_cli_missing", "install": "..."}`. Register `doctor` as a read-only tool. Add Ollama checks (binary, server on `:11434`, model pulled) and a "local" option in setup.
+5. **Per-task scratch workspace.** Create `~/.sf-agent/work/<task_id>/` with a generated `sfdx-project.json` (org API version), retrieve only the needed components, edit, deploy, reindex from the deploy result, then keep or delete. Point `agent_workspace()` at it. Optional `--project <path>` for developers with their own repo. Concerns: `sf project deploy/retrieve` needs an sfdx project dir, the sandbox boundary moves, state paths must not assume the repo layout (use `~/.sf-agent/`), there is no git undo (rollback engine is still unbuilt), and the org must be the source of truth.
+6. **Embedder abstraction.** Separate `EMBEDDER` setting from the chat provider. Record embedder name and dimension in the DB and re-embed on change (or refuse to mix). Gemini embeddings are cheap, so go fully local only if offline use is needed.
+7. **Caching tweaks (last).** Move dynamic values out of the system prompt, add a rolling breakpoint on the last message (Anthropic only), keep the transcript append-only, and truncate large tool results when first appended, never retroactively (editing old messages invalidates the prefix cache; Ollama reuses the KV cache for matching prefixes automatically). Optionally cache read-only org calls per session, invalidated on writes. Skip explicit Gemini `CachedContent`. Measure with the existing `cache_read_tokens`.
+
+## Caveat
+
+A small local model probably won't reliably complete the full plan / write / deploy / test demo. Use Ollama + `--mock-org` for plumbing and regression runs, and a hosted model for the demo. Unverified, so test it.
+
+## Open question
+
+Hardware (GPU/RAM) and installed Ollama models, which decide the test model and `num_ctx`.
+
+## Known test failures (as of 2026-10-06, baseline on `main`)
+
+Default `uv run pytest`: 582 passed, 11 skipped, 4 failed. The 4 failures are all in `tests/test_resume_cli.py` and fail with `Provider error: google-genai package not installed`. They are an environment gap (the `gemini` extra is not installed in the dev venv), not a code defect:
+
+- `test_latest_resolves_to_newest_in_flight`
+- `test_positional_task_id_dispatches_to_resume`
+- `test_resume_propagates_value_error_from_agent_loop`
+- `test_org_alias_flag_overrides_env`
+
+Treated as known and ignored when checking for regressions. Installing the extra (`uv sync --extra gemini`) should clear them; alternatively make these tests independent of a real provider.
