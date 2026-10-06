@@ -1,0 +1,38 @@
+{
+  "task": "T5",
+  "config": "C",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "No other Apex class calls `RecordSelectorController`. Two components reference it, according to the index (47 components, last built 4 minutes ago).\n\n**Callers**\n| Component | Type | How it uses it |\n|---|---|---|\n| `recordSelector` | Lightning Web Component | Has `RecordSelectorController` in its Apex imports. It's exposed on Record, App and Home pages, and touches `Account.Selected_Records__c` and `Case.Selected_Records__c`. |\n| `RecordSelectorControllerTest` | Apex test class | References the class directly. |\n\n**What would break if you rename it**\n1. **`recordSelector` LWC.** Its Apex import is `@salesforce/apex/RecordSelectorController.<method>`. After a rename the import no longer resolves, so the component fails to deploy. Every page where it's placed (Account and Case record pages, App pages, Home pages) would be affected.\n2. **`RecordSelectorControllerTest`.** It won't compile, so it blocks deployment and any test run that includes it.\n3. **Class file and metadata.** The `.cls` file and its `-meta.xml` need renaming together.\n\n**What the index can't see**\n- **Non-Apex references.** The graph covers Apex, flows, LWCs and similar. It doesn't reliably cover Aura components, Visualforce pages, or permission sets and profiles that grant access to the class. Those could reference it by name.\n- **Dynamic references.** String-based lookups such as `Type.forName('RecordSelectorController')` wouldn't show up in the graph. The exact-text search found only the three components above, so none appear to exist in the indexed code.\n- **Deployed state.** If the class or LWC has been edited in the org in the last few minutes, the index may not reflect it.\n\n**Suggested order**\n1. Rename the class and its meta file.\n2. Update the import in the `recordSelector` JS file.\n3. Update `RecordSelectorControllerTest`.\n4. Deploy all of them together, then run the test class.\n\nI can check the local source for Aura, Visualforce or permission set references to the class. I can also make the rename itself if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__index_status"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 758,
+  "result_chars": {
+    "sf-context": 3034,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.0310666,
+  "input_tokens": 4,
+  "cache_read_tokens": 23863,
+  "cache_creation_tokens": 4214,
+  "output_tokens": 943,
+  "wall_s": 15.8,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

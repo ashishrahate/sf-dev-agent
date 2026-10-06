@@ -246,6 +246,17 @@ class ContextService:
             "retrieve_error": result.retrieve_error,
             "inventory_errors": result.inventory_errors,
             "component_types": result.component_types,
+            "changes": {
+                "added": result.added[:50],
+                "modified": result.modified[:50],
+                "removed": result.removed[:50],
+                "counts": {
+                    "added": len(result.added),
+                    "modified": len(result.modified),
+                    "removed": len(result.removed),
+                },
+            },
+            "flow_version_error": result.flow_version_error,
         }
 
     def embed_metadata_index(

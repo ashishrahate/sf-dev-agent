@@ -1,5 +1,7 @@
 # Cross-agent test plan
 
+> Procedure for running this by hand in Cursor and VS Code Copilot: `MANUAL_TESTING.md`. Automated Claude Code results: `RESULTS.md`.
+
 Question: does sf-context make coding agents better at Salesforce work, alone and next to Salesforce's DX MCP server, and is it worth its context cost?
 
 ## Setup (once)

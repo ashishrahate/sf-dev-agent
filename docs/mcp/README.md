@@ -59,3 +59,9 @@ Result budgets: `retrieve_context` defaults to 2,500 tokens; `code_search` with 
 ## Changing embedder
 
 Vectors are tied to the model that made them. Switching `SF_CONTEXT_EMBEDDER` or the model makes embed and search calls return `embedder_mismatch`; call `embed_metadata_index` / `embed_knowledge_base` with `reset_embeddings=true` to recompute.
+
+## Testing
+
+- `TEST_PLAN.md`: what is compared and why.
+- `RESULTS.md`: results from the automated Claude Code runs (`scripts/mcp_bench.py`, `scripts/mcp_regrade.py`).
+- `MANUAL_TESTING.md`: step-by-step setup and procedure for running the same tasks in **Cursor** and **VS Code Copilot**.

@@ -1,0 +1,36 @@
+{
+  "task": "T4a",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "I saved the decision to the org's project memory (AgentforceOrg), so the team and other agents can recall it.\n\n- **Decision:** For complex Account logic, use Apex triggers with a handler class instead of Flows.\n- **Why:** The team owns the Apex skills.\n- **Scope:** I added a line that simple, declarative-friendly cases aren't covered. You didn't say that, so tell me if you want it removed or changed.\n\nIt's saved as `prefer-apex-triggers-over-flows-for-complex-account-logic` and can be recalled right away. It applies to this org only. I can re-save it as cross-org if you want it to cover every org in the tenant.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__memory_save"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 89,
+  "result_chars": {
+    "sf-context": 358,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 2,
+  "cost_usd": 0.0251302,
+  "input_tokens": 4,
+  "cache_read_tokens": 29381,
+  "cache_creation_tokens": 3209,
+  "output_tokens": 641,
+  "wall_s": 15.4,
+  "grade": {
+    "required_hit": 1,
+    "required_total": 1,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

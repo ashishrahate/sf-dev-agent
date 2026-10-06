@@ -1,0 +1,38 @@
+{
+  "task": "T5",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "No Apex class calls `RecordSelectorController`. Two other components reference it, and both would break on a rename.\n\n**What references it**\n\n| Component | How it uses it |\n|---|---|\n| `RecordSelectorControllerTest` (Apex test) | Makes direct static calls to `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails`. |\n| `recordSelector` (LWC) | Imports all three methods in `recordSelector.js:5-7`. |\n\nThe dependency graph and a text search of the local source agree on this.\n\n**What would break if you rename it**\n\n1. **The LWC `recordSelector`.** The imports are string paths, not class references:\n   - `@salesforce/apex/RecordSelectorController.searchRecords`\n   - `@salesforce/apex/RecordSelectorController.saveSelectedRecords`\n   - `@salesforce/apex/RecordSelectorController.getSelectedRecordsDetails`\n\n   After a rename these fail to resolve, so the component won't deploy or compile. The component is exposed on Record, App and Home pages, so anywhere it's placed would be affected. It also reads `Account.Selected_Records__c` and `Case.Selected_Records__c`, but those fields aren't touched by the rename.\n2. **`RecordSelectorControllerTest`.** It has 9 call sites (lines 23, 43, 60, 91, 111, 125, 146 and 167), and it won't compile until they are updated. The test class's own name also contains the old name. Rename it too if you want them to match.\n\n**Things the search can't see**\n- The index and grep only cover this project's source. Anything that exists only in the org would be missed. That includes dynamic Apex (`Type.forName('RecordSelectorController')`), managed packages and unretrieved metadata. I'd expect none, but I haven't verified it.\n- The class has no references to other custom Apex classes. It only uses `AuraHandledException`, `Exception` and `SObject`, so renaming it won't affect anything it depends on.\n\n**Rename steps**\n1. Rename `RecordSelectorController.cls` and its `-meta.xml` file, and change the class declaration.\n2. Update the three imports in `recordSelector.js`.\n3. Update the 9 call sites in the test class, and rename the test class if you want to.\n4. Deploy all of these together. If the Apex class is renamed in the org before the LWC is updated, the LWC breaks. Deploying a rename also doesn't delete the old class from the org. You'll need a destructive change for that.\n\nI can make these edits if you give me the new name.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "Grep"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 581,
+  "result_chars": {
+    "sf-context": 2325,
+    "salesforce-dx": 0,
+    "builtin": 1833
+  },
+  "turns": 4,
+  "cost_usd": 0.0336698,
+  "input_tokens": 4,
+  "cache_read_tokens": 17049,
+  "cache_creation_tokens": 4723,
+  "output_tokens": 1136,
+  "wall_s": 10.9,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

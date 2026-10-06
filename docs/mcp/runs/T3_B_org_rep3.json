@@ -1,0 +1,41 @@
+{
+  "task": "T3",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "**Short version:** `AccountTriggerHandler` has no governor-limit violations. The real problems are in the code it calls (`AccountService` and `AccountSelector`). I read all three plus the trigger and the tests.\n\n## Handler and trigger\n- **Bulk-safe, thin, and logic-free.** The trigger is `before insert, before update` only and delegates straight to the handler.\n- **Bypass flag.** `setBypassTrigger` is a public static flag with no `try/finally` reset pattern. If a caller sets it and then throws, triggers stay bypassed for the rest of the transaction. This is a minor risk, not a limit problem.\n- **Redundant check.** `if (Trigger.isBefore)` is always true given the declared events.\n\n## Governor limits\n- **SOQL in loops:** none. `AccountSelector` runs one query per trigger chunk of up to 200 records, so 100 queries is not reachable in practice.\n- **DML in loops:** none, because the trigger only calls `addError`.\n- **Query rows:** the query has no `LIMIT`. A `Phone IN :set` match can return many rows if duplicate data already exists. It would take a very large dataset to reach 50,000 rows.\n- **Non-selective query (most likely limit issue):** `Phone` is not indexed by default. On an org with a large Account table (roughly 200k+ records), a `WHERE Phone IN \u2026` query inside a trigger can fail with a non-selective query error. Ask support to index `Phone`, or use a normalized external-ID or unique field instead.\n\n## Anti-patterns and correctness gaps\n1. **No in-batch duplicate detection.** `AccountService` only compares against existing database rows. If one insert contains two new accounts with the same phone, both pass. The bulk test doesn't cover this case.\n2. **`with sharing` plus `WITH SECURITY_ENFORCED` on a uniqueness check.**\n   - Duplicates the running user can't see are never found.\n   - A user without field-level access to `Phone` gets an uncaught `QueryException`, which blocks the save.\n   - Uniqueness checks usually run in system mode. If you keep user-mode enforcement, prefer `WITH USER_MODE` over the legacy `SECURITY_ENFORCED`.\n3. **Fragile duplicate map.**\n   - `existingPhonesMap` keeps one Id per phone, and a later row overwrites an earlier one.\n   - The self-exclusion check (`existingPhonesMap.get(phone) == acc.Id`) can then miss a real duplicate or flag a false one when several existing records share a phone.\n   - The final loop also validates unchanged records. An unchanged account can be flagged just because another account in the batch changed to a matching phone.\n   - A `Map<String, Set<Id>>`, checked only for records whose phone changed, would fix this.\n4. **Exact-string matching.** `111-111-1111` and `(111) 111-1111` are treated as different numbers. Normalize the phone number before comparing.\n5. **Reinventing a platform feature.** Standard Matching and Duplicate Rules handle this without code or limit exposure.\n6. **Race condition.** Two concurrent transactions can both pass the check and both insert. Only a unique field can fully prevent that.\n\n## Tests\n- `AccountTrigger_Test` has no meaningful assertions about the duplicate logic, and its empty `@TestSetup` is dead code.\n- Nothing runs 200+ records through the trigger itself. The 200-record test calls `AccountService` directly.\n- Nothing tests the in-batch duplicate case or the user-permission case.\n\nI'd fix items 1\u20133 first, since they're correctness bugs. Then I'd check whether `Phone` selectivity matters at your data volume.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 4,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 5599,
+  "result_chars": {
+    "sf-context": 22396,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 5,
+  "cost_usd": 0.0865338,
+  "input_tokens": 8,
+  "cache_read_tokens": 40069,
+  "cache_creation_tokens": 12656,
+  "output_tokens": 2788,
+  "wall_s": 26.2,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

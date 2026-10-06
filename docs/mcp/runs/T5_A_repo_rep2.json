@@ -1,0 +1,36 @@
+{
+  "task": "T5",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "**No other Apex classes call `RecordSelectorController`.** Only two files reference it, and one of them is its own test class.\n\n**Callers**\n- `RecordSelectorControllerTest.cls` calls `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails` directly. It calls them at lines 23, 43, 60, 91, 111, 125, 146 and 167.\n- `lwc/recordSelector/recordSelector.js:5-7` imports the same three methods through `@salesforce/apex/RecordSelectorController.<method>`.\n\n**What breaks if you rename it**\n1. **LWC imports:** the three import paths in `recordSelector.js` are string-based module specifiers. Deploying with the class renamed fails with an unresolved-module error, and nothing warns you before then.\n2. **Test class:** every `RecordSelectorController.xxx(...)` call stops compiling. The test class's own name (`RecordSelectorControllerTest`) isn't tied to the class name, but you'd probably want to rename it to match.\n3. **The class file:** you need to rename both `RecordSelectorController.cls` and its `-meta.xml`, and change the declaration on line 1.\n\n**Other places to check**\n- I only searched the source tree. A rename can also break things that live in the org but not in this repo, such as flows, other packages, or profile and permission set entries. Class access is stored in profiles and permission sets under `<classAccesses>`. The grep found no matches in this repo, but the org may still have them.\n- If any `.js` file calls the controller through a dynamic string, the search wouldn't have found it.\n\nI can do the rename across these files if you'd like. Tell me the new name.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Grep"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 0,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 0,
+    "builtin": 1833
+  },
+  "turns": 2,
+  "cost_usd": 0.0238948,
+  "input_tokens": 4,
+  "cache_read_tokens": 21794,
+  "cache_creation_tokens": 3217,
+  "output_tokens": 666,
+  "wall_s": 14.7,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

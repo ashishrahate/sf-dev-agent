@@ -1,0 +1,41 @@
+{
+  "task": "T3",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "**Summary:** `AccountTriggerHandler` has no governor-limit problems of its own. The real issues are in the code it calls (`AccountService` and `AccountSelector`), and they are mostly correctness and design problems rather than limit violations. I read the handler, `AccountService`, `AccountSelector`, the trigger and the tests.\n\n## What's fine\n- **Logic-less trigger:** `AccountTrigger` has one trigger per object and only delegates.\n- **Bulkification:** the handler passes whole `Trigger.new` lists through.\n- **Query and DML counts:** the whole path uses one SOQL query per transaction, skipped when no phones changed. There is no SOQL or DML in a loop and no DML at all.\n- **Error handling:** `addError` is on the field, which is the right approach in a before trigger.\n\n## Governor-limit and performance risks\n1. **Non-selective query (`AccountSelector.cls`):** `WHERE Phone IN :phoneNumbers` filters on the standard `Phone` field, which is not indexed by default. On an org with a large Account table (roughly 200k+ rows), this can fail with \"Non-selective query against large object type\". Because it runs inside a trigger, it would block inserts and updates. Ask Salesforce Support to index `Phone`, or move to a normalized external-ID field that is indexed or unique.\n2. **Unbounded result set:** the query has no `LIMIT`. It is bounded by the `IN` filter, so this is low risk, but heavy data skew could push it toward the 50k row limit.\n\n## Anti-patterns and correctness bugs\n1. **Duplicates inside the same batch are missed (`AccountService.cls`):** the check only compares against records already in the database. Two new accounts with the same phone in one insert both pass. None of the tests cover this case.\n2. **Update self-match bug:** `existingPhonesMap` keeps only one Id per phone (the last one returned). If the record being updated is itself one of several accounts sharing that phone, the map may hold its own Id. The `continue` then skips it, and a real duplicate goes undetected. Use `Map<String, Set<Id>>`, or exclude the current record Ids in the query with `Id NOT IN :ids`.\n3. **`with sharing` plus `WITH SECURITY_ENFORCED` on an integrity check:** the check can't see accounts the user doesn't have access to, so duplicates slip through. A user without field-level access to `Phone` gets a `QueryException` instead of a clean validation result. A uniqueness check should run `without sharing` (or in system mode), with the access check left to the DML itself. `SECURITY_ENFORCED` is also the older mechanism, and `WITH USER_MODE` is preferred if you do want user-level enforcement.\n4. **Race condition:** two concurrent transactions can both pass the check and both insert. Apex alone can't fully prevent that. A Duplicate/Matching Rule, or a unique external-ID field populated from the phone number, is the robust fix.\n5. **Exact string matching:** `111-111-1111` and `(111) 111-1111` count as different phones. Normalize the number before comparing.\n6. **Dead condition:** `|| acc.Id == null` in the update path can never be true on update.\n7. **Bypass flag (`AccountTriggerHandler.cls`):** `setBypassTrigger` is public and unrestricted. Any code, in any transaction path, can switch off duplicate protection, and nothing resets it if an exception occurs before cleanup. Consider gating the bypass on a custom permission or custom metadata, or at least restrict it to `@TestVisible`/integration use. This is a minor issue.\n\n## Test gaps\n- `AccountTrigger_Test` makes no assertions about validation behavior.\n- No handler test uses 200 records. The 200-record bulk test is in `AccountService_Test` only.\n- There is no test for same-batch duplicates, phone-format variants, or users without access to the data.\n\n## Suggested priority\n1. Fix the same-batch and self-match bugs (items 1 and 2 under correctness).\n2. Decide on sharing and security mode (item 3).\n3. Plan indexing or a unique field to address the selectivity and race-condition risks.\n\nI haven't changed any code. I can write the corrected `AccountService`, plus tests for the missed cases, if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__code_search",
+    "Glob",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 5046,
+  "result_chars": {
+    "sf-context": 20184,
+    "salesforce-dx": 0,
+    "builtin": 493
+  },
+  "turns": 5,
+  "cost_usd": 0.0875942,
+  "input_tokens": 8,
+  "cache_read_tokens": 50321,
+  "cache_creation_tokens": 11961,
+  "output_tokens": 2967,
+  "wall_s": 27.1,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

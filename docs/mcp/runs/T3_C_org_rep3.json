@@ -1,0 +1,41 @@
+{
+  "task": "T3",
+  "config": "C",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "## Review of AccountTriggerHandler\n\nI read the trigger, the handler, `AccountService` and `AccountSelector`. The handler itself is only 18 lines and delegates everything. Most of the findings below are in the code it calls.\n\n### Practices it follows\n- **No SOQL or DML in loops.** There is one selector query per trigger invocation, so it is bulk-safe.\n- **Logic-less trigger.** `AccountTrigger` only routes to the handler.\n- **Sets and maps for lookups.** The phone numbers go into a `Set`, and the existing phones go into a `Map`.\n- **Skips unchanged records.** It only checks phone numbers that are new or changed.\n- **Selector layer and `with sharing`.** The query lives in `AccountSelector`, and all three classes use `with sharing`.\n- **Bulk test.** There is a test with 200 or more records.\n\n### Problems that apply\n\n1. **Duplicates within the same batch aren't detected (correctness bug).**\n   - `AccountService` only compares incoming records against records already in the database.\n   - If two accounts in one insert share a phone number, neither is flagged.\n   - `testBulkInsertWithDuplicates` only passes because its duplicates match existing records.\n   - Fix: track phones already seen in the batch (`Set` or `Map<String, Account>`) and call `addError` on the second occurrence.\n\n2. **Update path can miss or mishandle records (logic and anti-pattern).**\n   - The check `... || acc.Id == null` is dead code in `before update`, because `Id` is never null there.\n   - `oldAccountMap.get(acc.Id) != null` is a defensive check that never fails.\n   - On update, the self-match is skipped with `existingPhonesMap.get(acc.Phone) == acc.Id`. But `existingPhonesMap` holds only one Id per phone.\n   - If the database already holds several accounts with the same phone (legacy data), the map keeps an arbitrary one. A record can then be wrongly flagged, or a real duplicate missed. Fix: map phone to a `Set<Id>`, or exclude `Trigger.newMap.keySet()` in the query.\n\n3. **Phone matching is exact and string-based (data quality).** `'555-123-4567'`, `'(555) 123-4567'` and `'5551234567'` are treated as different, so the duplicate check is easy to bypass. Normalize the phone number (strip non-digits) before comparing.\n\n4. **Unfiltered, unselective SOQL (limit risk).**\n   - `Phone` is not indexed by default, so `WHERE Phone IN :phoneNumbers` can be a non-selective query.\n   - On orgs with large Account volumes (more than about 200k rows), this can throw \"Non-selective query against large object type\" in triggers.\n   - The query also has no `LIMIT`. Rows are bounded by the 50,000 query-row limit, which is only an issue if heavy legacy duplication exists.\n   - Fix: ask for an external ID or custom index on Phone, or use a normalized, indexed custom field.\n\n5. **`WITH SECURITY_ENFORCED` in a duplicate-prevention check (anti-pattern).**\n   - It throws an exception if the running user lacks field-level read access to `Phone`, so the user's insert fails with a confusing error.\n   - Even worse, it can hide duplicates the user can't see. The `with sharing` setting means records owned by others and not shared with the user won't be returned, so the duplicate check silently passes.\n   - Duplicate prevention usually needs system-level visibility (`without sharing` in the selector, or `WITH SYSTEM_MODE`). If the current behavior is intentional, document it.\n\n6. **Static `bypassTrigger` flag is a weak bypass mechanism.**\n   - It is a public, unrestricted global switch in production code, and nothing forces it to be reset. If an exception occurs between `setBypassTrigger(true)` and the reset, later operations in the same transaction stay unprotected.\n   - Prefer a Custom Permission or Custom Metadata bypass, which is auditable and controllable without a deployment.\n   - The `boolean` type should be `Boolean` to match Apex convention.\n\n7. **Smaller issues**\n   - The handler is static with no `Trigger.isBefore` structure beyond the trigger. If you later add after-events, a trigger framework (or `TriggerHandler` base class) would help.\n   - The trigger's `if (Trigger.isBefore)` check is redundant because the trigger only declares before events.\n   - The error message embeds the raw phone number, which may expose data. Consider whether that's a concern.\n   - `addError` on `acc.Phone` is good, but the message should be a Custom Label for localization.\n\n### Test gaps\n- No test for duplicates within one batch (problem 1).\n- No test with more than 200 records through the trigger, which would show chunking behavior.\n- No test for restricted-user or sharing scenarios (problem 5).\n- `AccountTrigger_Test` asserts only that the record has an Id, so it doesn't test any trigger behavior.\n\n### Priority\n1. Fix the in-batch duplicate check (problem 1) and the update-path map logic (problem 2).\n2. Resolve the `SECURITY_ENFORCED` and sharing behavior (problem 5).\n3. Address selectivity and phone normalization (problems 3 and 4).\n4. Replace the static bypass (problem 6).\n\nI can draft the `AccountService` fix and the missing tests if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 4,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 5599,
+  "result_chars": {
+    "sf-context": 22396,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 5,
+  "cost_usd": 0.0871236,
+  "input_tokens": 8,
+  "cache_read_tokens": 64688,
+  "cache_creation_tokens": 12660,
+  "output_tokens": 2353,
+  "wall_s": 28.1,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

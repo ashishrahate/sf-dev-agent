@@ -1,0 +1,39 @@
+{
+  "task": "T4b",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "Account already has a trigger framework here, so add your logic to it instead of creating a new trigger.\n\n**What exists**\n- `AccountTrigger` (before insert, before update) only delegates. It calls `AccountTriggerHandler.beforeInsert(Trigger.new)` and `beforeUpdate(Trigger.new, Trigger.oldMap)`.\n- `AccountTriggerHandler` (`with sharing`) has a `bypassTrigger` flag. Each handler method calls a method on `AccountService`. Today that is `AccountService.preventDuplicateAccounts(...)`, which blocks duplicate phone numbers.\n- Tests are in `AccountTriggerHandler_Test` and `AccountTrigger_Test`.\n- A saved team decision says to use Apex triggers with a handler class for complex Account logic, not Flows. I'm following that.\n\n**How to add your logic**\n1. **Put the logic in `AccountService`.** Add a bulk-safe static method that takes `List<Account>`. Don't put business logic in the trigger or the handler.\n2. **Call it from `AccountTriggerHandler.beforeInsert`**, after the `bypassTrigger` check. Put it after `preventDuplicateAccounts` unless it needs to run first.\n3. **Pick the trigger event that fits.**\n   - **Before insert** works as-is. Use it to set or default fields on `Trigger.new`, with no DML needed. It is also the place for validation with `addError`.\n   - **After insert** needs a change, because the trigger doesn't listen for it yet. Use it for related records (Contacts, Tasks, Opportunities) or anything that needs the new `Id`. Add `after insert` to the trigger's event list. Add an `isAfter` branch that calls a new `AccountTriggerHandler.afterInsert(...)`. Keep the bypass check.\n4. **Bulkify.** Handle the whole list. Don't put SOQL or DML inside loops. Collect IDs into sets and maps, then do one query and one DML.\n5. **Test it.** Add tests to `AccountTriggerHandler_Test` that insert one record and a bulk batch of 200. Assert the new behavior, and assert the bypass flag still works.\n\nI haven't changed any files. Two questions would let me write the code:\n- What should the logic do?\n- Does it need to run before or after the insert?",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 4,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 2999,
+  "result_chars": {
+    "sf-context": 11998,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 5,
+  "cost_usd": 0.048303200000000004,
+  "input_tokens": 6,
+  "cache_read_tokens": 19976,
+  "cache_creation_tokens": 8109,
+  "output_tokens": 1186,
+  "wall_s": 20.9,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

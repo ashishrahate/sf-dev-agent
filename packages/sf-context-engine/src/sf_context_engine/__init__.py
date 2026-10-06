@@ -61,6 +61,7 @@ from sf_context_engine.delta import (
     OrgComponent,
     OrgInventory,
     compute_deltas,
+    fetch_flow_versions,
     fetch_org_inventory,
 )
 from sf_context_engine.embedders import (
@@ -127,6 +128,11 @@ class IndexBuildResult:
     components_deleted: int = 0           # rows pruned because they no longer exist in the org
     components_unchanged: int = 0         # rows the delta planner skipped — still in the index
     inventory_errors: list[str] = field(default_factory=list)
+    # What this run changed in the index (component ids), compared before vs after.
+    added: list[str] = field(default_factory=list)
+    modified: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    flow_version_error: str | None = None
 
 
 def default_db_path() -> Path:
@@ -258,21 +264,90 @@ def build_index(
     )
     types = component_types or default_component_types()
 
+    before = _snapshot(db_path)
     if delta:
-        return _build_index_delta(
+        result = _build_index_delta(
             org_alias=org_alias,
             db_path=db_path,
             retrieve_dir=retrieve_dir,
             component_types=types,
             cleanup_retrieve=cleanup_retrieve,
         )
-    return _build_index_full(
-        org_alias=org_alias,
-        db_path=db_path,
-        retrieve_dir=retrieve_dir,
-        component_types=types,
-        cleanup_retrieve=cleanup_retrieve,
-    )
+    else:
+        result = _build_index_full(
+            org_alias=org_alias,
+            db_path=db_path,
+            retrieve_dir=retrieve_dir,
+            component_types=types,
+            cleanup_retrieve=cleanup_retrieve,
+        )
+    if result.success:
+        if "Flow" in types:
+            result.flow_version_error = _annotate_flow_versions(org_alias, db_path)
+        after = _snapshot(db_path)
+        result.added = sorted(after.keys() - before.keys())
+        result.removed = sorted(before.keys() - after.keys())
+        result.modified = sorted(
+            cid for cid in after.keys() & before.keys() if after[cid] != before[cid]
+        )
+    return result
+
+
+def _snapshot(db_path: Path) -> dict[str, str]:
+    """component id -> content hash, to report what a build run changed."""
+    import hashlib
+    import sqlite3
+
+    if not Path(db_path).exists():
+        return {}
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT id, COALESCE(source, ''), COALESCE(metadata_json, '') FROM components"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
+    return {r[0]: hashlib.sha1((r[1] + "\0" + r[2]).encode("utf-8")).hexdigest() for r in rows}
+
+
+def _annotate_flow_versions(org_alias: str, db_path: Path) -> str | None:
+    """Add active/latest version info to each indexed Flow's metadata.
+
+    Returns an error message if the lookup failed (the index is left as is).
+    """
+    import json
+    import sqlite3
+
+    versions, err = fetch_flow_versions(org_alias)
+    if err:
+        return err
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for cid, name, meta in conn.execute(
+            "SELECT id, api_name, metadata_json FROM components WHERE component_type = 'Flow'"
+        ).fetchall():
+            info = versions.get(name)
+            if not info:
+                continue
+            data = json.loads(meta or "{}")
+            data.update(info)
+            if info["is_active"] and info["active_version"] != info["latest_version"]:
+                data["version_note"] = (
+                    f"Indexed source is the latest version (v{info['latest_version']}, "
+                    f"{info['latest_status']}), but v{info['active_version']} is the active "
+                    "version and is what runs. The top-level 'status' reflects the latest "
+                    "version, not what is running."
+                )
+            conn.execute(
+                "UPDATE components SET metadata_json = ? WHERE id = ?",
+                (json.dumps(data, sort_keys=True), cid),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return None
 
 
 def _build_index_full(

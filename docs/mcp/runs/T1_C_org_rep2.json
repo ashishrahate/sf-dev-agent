@@ -1,0 +1,45 @@
+{
+  "task": "T1",
+  "config": "C",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "The index (built 1 minute ago) shows one trigger, one flow, a four-class chain and an LWC that touch Account. It has no validation rules on Account, but I couldn't fully confirm that.\n\n## Components\n\n**Trigger**\n- `AccountTrigger` runs before insert and before update. It calls `AccountTriggerHandler`.\n\n**Flow**\n- `Append_Billing_Country_to_Account_Name` is a before-save record-triggered flow on Account, on create and update.\n- Version 8 is active and is what runs. Version 9 is a Draft, and the index holds v9's source.\n- It has no subflows or Apex actions.\n\n**Validation rules**\n- The index returned none for Account. Only 47 components are indexed, and the dependency graph had no entry for the Account object itself. If you expect rules, run `build_metadata_index` with `full_refresh=true` or retrieve them directly.\n\n**Apex classes**\n\n| Class | Role |\n|---|---|\n| `AccountTriggerHandler` | Calls `AccountService` on before insert and before update. It has a static `setBypassTrigger` switch that turns the logic off. |\n| `AccountService` | `preventDuplicateAccounts` collects new or changed Phone values and rejects any that already exist, using `addError` on `Phone`. |\n| `AccountSelector` | `selectByPhoneNumbers` runs a SOQL query on `Account` by Phone, with `WITH SECURITY_ENFORCED`. |\n| `RecordSelectorController` | Backs the `recordSelector` LWC. The index shows no direct Account reference. |\n\n**Tests**\n- `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test` and `AccountSelector_Test` cover the trigger chain.\n- `RecordSelectorControllerTest` covers the controller.\n\n**LWC**\n- `recordSelector` uses `Account.Selected_Records__c` and `Case.Selected_Records__c`. It is exposed on record, app and home pages.\n\n## Dependencies\n\n```\nAccount save (before)\n \u251c\u2500 AccountTrigger \u2500\u25ba AccountTriggerHandler \u2500\u25ba AccountService \u2500\u25ba AccountSelector \u2500\u25ba SOQL on Account.Phone\n \u2514\u2500 Flow: Append_Billing_Country_to_Account_Name (v8, before-save)\n\nrecordSelector (LWC) \u2500\u25ba RecordSelectorController\n                    \u2514\u2500\u25ba Account.Selected_Records__c\n```\n\n## Notes\n- **Flow and trigger interaction:** The flow and the trigger both run before save. The graph shows no dependency edges between them. The flow changes Account Name, and the trigger checks only Phone, so they probably don't conflict. I didn't read the flow's logic to confirm.\n- **Duplicate check:** In `AccountService`, the condition `acc.Id == null` sits inside an OR with `oldAccountMap == null`. This is harmless on insert. Two new records in the same batch with the same Phone won't be caught, because the check only looks at existing database records.\n- **Flow version:** v9 is a Draft, so activating it later would change behavior.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph"
+  ],
+  "calls_ctx": 7,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 4859,
+  "result_chars": {
+    "sf-context": 19437,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 8,
+  "cost_usd": 0.11453400000000001,
+  "input_tokens": 6,
+  "cache_read_tokens": 29160,
+  "cache_creation_tokens": 22520,
+  "output_tokens": 1861,
+  "wall_s": 20.9,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": true,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": []
+  }
+}

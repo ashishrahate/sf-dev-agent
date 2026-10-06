@@ -1,0 +1,37 @@
+{
+  "task": "T5",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "No other Apex class calls `RecordSelectorController`. It has two callers, one in Apex and one in LWC. The dependency graph and a text search of the local source agree.\n\n**Callers**\n- **`RecordSelectorControllerTest`** (Apex test class) calls `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails` directly. These are static calls at lines 23, 43, 60, 91, 111, 125, 146 and 167.\n- **`recordSelector`** (LWC, `lwc/recordSelector/recordSelector.js:5-7`) imports the same three methods:\n  - `@salesforce/apex/RecordSelectorController.searchRecords`\n  - `@salesforce/apex/RecordSelectorController.saveSelectedRecords`\n  - `@salesforce/apex/RecordSelectorController.getSelectedRecordsDetails`\n\n**What breaks if you rename the class**\n1. **`recordSelector` LWC.** The three import paths embed the class name as a string, so the bundle fails to compile or deploy until you update them. Tooling won't rewrite these for you, and this is the most likely place to miss one.\n2. **`RecordSelectorControllerTest`.** Every static call, 8 in total, stops compiling. The test class's own name also follows the old name, so you'd probably rename it too.\n3. **The file pair.** `RecordSelectorController.cls` and its `-meta.xml` have to be renamed together, along with the `public with sharing class` declaration on line 1.\n\n**What the checks didn't cover**\n- The index and my search only cover the local `force-app` source. I didn't check the org for anything not in this repo, such as flows, Visualforce pages, Aura components, or managed or unmanaged packages that could reference the class.\n- I didn't search for dynamic references like `Type.forName('RecordSelectorController')`. A plain-text search would have matched that string, and it found nothing.\n- Anything outside this project, such as permission sets or profiles with class access, would also need a check. Class access is stored by class name, so a rename can drop it. I didn't look for those. If you want, I can grep `permissionsets` and `profiles`.\n\nIf you rename it, the order I'd follow is: rename the class and meta file, update the three LWC imports, update the test class, then deploy all of it together. Deploying them in one operation avoids a broken intermediate state in the org.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "Grep"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 239,
+  "result_chars": {
+    "sf-context": 957,
+    "salesforce-dx": 0,
+    "builtin": 1833
+  },
+  "turns": 3,
+  "cost_usd": 0.031871,
+  "input_tokens": 4,
+  "cache_read_tokens": 29355,
+  "cache_creation_tokens": 4018,
+  "output_tokens": 992,
+  "wall_s": 17.0,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

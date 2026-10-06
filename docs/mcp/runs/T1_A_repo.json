@@ -40,9 +40,11 @@
     "required_total": 6,
     "missing": [],
     "bonus": {
-      "says flow is draft/inactive": true,
+      "says the flow is active (v8) and a newer draft exists": false,
       "says no validation rules exist": false
     },
-    "forbidden_flags": []
+    "forbidden_flags": [
+      "claims the flow is not running / inactive"
+    ]
   }
 }

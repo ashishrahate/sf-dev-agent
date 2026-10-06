@@ -1,0 +1,37 @@
+{
+  "task": "T4b",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "Add it to the existing Account trigger and handler. Don't create a new trigger or a Flow.\n\n**What's already here**\n- `AccountTrigger` fires on `before insert, before update` and calls `AccountTriggerHandler.beforeInsert(Trigger.new)`.\n- `AccountTriggerHandler` has a `bypassTrigger` flag and delegates to `AccountService.preventDuplicateAccounts`, which checks for duplicate phone numbers. `AccountSelector` holds the SOQL.\n- There's also a record-triggered Flow, `Append_Billing_Country_to_Account_Name`. Check its trigger timing so your logic doesn't conflict with it, for example by both editing `Name`.\n- A saved team decision says complex Account automation should be Apex trigger plus handler, not Flow.\n\n**How to add it**\n\n1. **Put the logic in `AccountService`.** Add a method such as `AccountService.myNewLogic(List<Account>)`. Keep it bulk-safe, with no SOQL or DML inside loops.\n2. **Call it from `AccountTriggerHandler.beforeInsert`.** Add the call after the existing `preventDuplicateAccounts` line, inside the `bypassTrigger` guard, so the bypass covers it:\n   ```apex\n   public static void beforeInsert(List<Account> newAccounts) {\n       if (bypassTrigger) return;\n       AccountService.preventDuplicateAccounts(newAccounts, null);\n       AccountService.myNewLogic(newAccounts);\n   }\n   ```\n3. **Use the selector for any queries.** Put them in `AccountSelector`, which follows the existing `with sharing` and `WITH SECURITY_ENFORCED` pattern.\n4. **Change the trigger only if the timing requires it.**\n   - If you're setting fields on the record being inserted, `before insert` already works, and you can assign fields directly with no DML.\n   - If you need the record Id, or need to create related records, add `after insert` to `AccountTrigger` and a new `afterInsert` method on the handler.\n   - Keep it as one trigger per object.\n5. **Add tests** to `AccountTriggerHandler_Test` or `AccountService_Test`. Include a bulk insert of 200 records and a bypass case.\n\nIf the logic does DML on Account, add a static recursion guard.\n\nWhat should the logic do, and does it need the new record's Id? That decides before versus after insert. I can then write the code.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "Glob"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 4052,
+  "result_chars": {
+    "sf-context": 16211,
+    "salesforce-dx": 0,
+    "builtin": 1848
+  },
+  "turns": 3,
+  "cost_usd": 0.055883199999999994,
+  "input_tokens": 4,
+  "cache_read_tokens": 17046,
+  "cache_creation_tokens": 10489,
+  "output_tokens": 1051,
+  "wall_s": 11.5,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

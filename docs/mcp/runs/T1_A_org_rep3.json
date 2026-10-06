@@ -1,0 +1,61 @@
+{
+  "task": "T1",
+  "config": "A",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "The Account object has one trigger, one record-triggered flow, no validation rules and a small Apex stack behind the trigger. I ran everything against `AgentforceOrg` (`<org-username>`) because no default target org is configured and it's the only authenticated org.\n\n## Inventory\n\n| Type | Component | Details |\n|---|---|---|\n| Trigger | `AccountTrigger` | Active, API 62. Runs before insert and before update. |\n| Flow | `Append_Billing_Country_to_Account_Name` | Active version 8. Record-triggered, before-save, on create and update. |\n| Validation rules | none | The Tooling API returned 0 rows for Account. |\n| Handler | `AccountTriggerHandler` | Has `beforeInsert`, `beforeUpdate` and a `setBypassTrigger(Boolean)` switch. |\n| Service | `AccountService` | `preventDuplicateAccounts(accounts, oldMap)` |\n| Selector | `AccountSelector` | `selectByPhoneNumbers(Set<String>)` queries `Account` with `WITH SECURITY_ENFORCED`. |\n| Tests | `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test`, `AccountSelector_Test` | |\n\n## Dependencies\n\n```\nSave of an Account\n \u251c\u2500 1. Flow: Append_Billing_Country_to_Account_Name   (before-save flow, runs first)\n \u2502      sets $Record.Name = Name & \" - \" & BillingCountry\n \u2514\u2500 2. Trigger: AccountTrigger  (before insert / before update)\n        \u2514\u2500 AccountTriggerHandler.beforeInsert / beforeUpdate   (skipped if bypassTrigger = true)\n             \u2514\u2500 AccountService.preventDuplicateAccounts\n                  \u2514\u2500 AccountSelector.selectByPhoneNumbers   (SOQL on Account.Phone)\n                  \u2514\u2500 acc.Phone.addError('An Account with this phone number already exists: \u2026')\n```\n\n- **Duplicate check:** it only looks at phone numbers that are new or changed. On update it ignores a match against the record's own Id.\n- **Tests:**\n  - `AccountTrigger_Test` only checks that the trigger fires.\n  - `AccountTriggerHandler_Test` tests the trigger end to end through DML, including bypass and bulk cases.\n  - `AccountService_Test` and `AccountSelector_Test` test those classes directly.\n- **Flow versus trigger:** the flow and the Apex stack don't call each other. They only interact through the order of execution. They touch different fields (`Name` and `BillingCountry` for the flow, `Phone` for Apex), so I found no conflict.\n\n## Other Apex touching Account\n\n- `RecordSelectorController` is generic and works on any object. It maps the `001` prefix to `'Account'` in `getObjectApiNameFromPrefix`. It can query Account and update an Account field, but it has no compile-time dependency on the Account classes.\n- None of the Lead and Case classes reference Account. I read all of their bodies.\n\n## Things worth checking\n\n1. **The flow doesn't match its description.** The description says it only runs when `Name` or `BillingCountry` changes. The active version's start element has no entry conditions or filters, so it runs on every create and update. It stays idempotent only because of the `EndsWith \" - Country\"` check.\n2. **A newer flow version exists.** The latest version (`301gK000014Xy5pQAC`) isn't the active one (`301gK000014L4loQAC`, v8). It's probably an unactivated draft, and I didn't inspect it.\n3. **No deactivation check for the flow.** The handler's `setBypassTrigger` only bypasses the trigger, not the flow.\n4. **Possible phone-matching gap.** The duplicate check compares exact `Phone` strings, so `111-111-1111` and `(111) 111-1111` count as different. Account names that the flow changes also won't affect it.\n\nI couldn't search the full class-body export on disk because the file-reading tools were disabled in this session. Instead I queried the specific class bodies directly. Reflecting that, the \"no other Account references\" finding covers the 27 classes in the org by name. I read the bodies of 15 non-test classes and the 4 Account test classes, not the other test classes. I didn't check Process Builder, workflow rules, or Account-related Lightning components and LWCs.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "Grep",
+    "Bash",
+    "Read",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 20,
+  "calls_builtin": 3,
+  "mcp_result_tokens_est": 21929,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 87716,
+    "builtin": 402
+  },
+  "turns": 24,
+  "cost_usd": 0.28172240000000004,
+  "input_tokens": 22,
+  "cache_read_tokens": 193052,
+  "cache_creation_tokens": 43077,
+  "output_tokens": 7076,
+  "wall_s": 57.5,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": true,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": []
+  }
+}

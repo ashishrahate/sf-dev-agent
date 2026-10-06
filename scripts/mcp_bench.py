@@ -66,10 +66,19 @@ TASKS: dict[str, Task] = {t.id: t for t in [
             ("chain trigger->handler->service->selector", r"(?s)AccountTrigger.*AccountTriggerHandler.*AccountService.*AccountSelector"),
         ],
         bonus=[
-            ("says flow is draft/inactive", r"(?i)draft|inactive|not active"),
+            ("says the flow is active (v8) and a newer draft exists",
+             r"(?i)(active|running)[^.\n|]{0,100}(v ?8|version 8|v ?9|newer|draft)"
+             r"|(v ?8|version 8)[^.\n|]{0,60}(active|running)"),
             ("says no validation rules exist", r"(?i)no (active |custom )?validation rules|zero validation rules|0 validation rules|validation rules?:?\s*(none|0)"),
         ],
-        forbidden=[("invented validation rule", r"(?i)\b\w+_(?:VR|Rule|Validation)\b")],
+        forbidden=[
+            ("invented validation rule", r"(?i)\b\w+_(?:VR|Rule|Validation)\b"),
+            # The flow's latest version is a Draft, but v8 is Active and running.
+            ("claims the flow is not running / inactive",
+             r"(?i)draft[^.\n|]{0,80}(isn'?t|is not|not) (running|active|live)"
+             r"|(isn'?t|is not|not) (running|active|live)[^.\n|]{0,80}draft"
+             r"|flow[^.\n]{0,60}\binactive\b"),
+        ],
     ),
     Task(
         "T2",
@@ -121,7 +130,8 @@ TASKS: dict[str, Task] = {t.id: t for t in [
         "T6",
         "Is your view of the org up to date? Refresh it if not, then tell me what changed.",
         required=[("names the changed class", r"AccountSelector"),
-                  ("says it was refreshed/updated", r"(?i)refresh|re-?index|updated|up to date")],
+                  ("says it refreshed the index",
+                   r"(?i)refresh|re-?index|re-?build|incremental build|re-?embed|updated|up to date")],
         configs="BC", writes_org=True,
         note="Run only after the harness mutated AccountSelector in the org.",
     ),
@@ -302,13 +312,23 @@ def grade_t2(summary: dict, cfg: str) -> dict:
     ans = summary["answer"]
     checks = {
         "code references AnnualRevenue": "AnnualRevenue" in text,
-        "rejects negative (< 0 / addError)": bool(re.search(r"AnnualRevenue\s*<\s*0", text)) and "addError" in text,
+        "rejects negative (< 0 check + addError)": bool(re.search(
+            r"AnnualRevenue\s*<\s*0|AnnualRevenue\s*>=\s*0|0\s*>\s*\w+\.AnnualRevenue", text,
+        )) and "addError" in text,
         "no SOQL/DML added in loop (heuristic)": not re.search(r"for\s*\([^)]*\)\s*\{[^}]*\[\s*SELECT", text),
         "has test coverage change": any("test" in p.lower() for p in changed + new)
                                    or bool(re.search(r"@IsTest", text, re.I)),
         "followed existing structure (edited handler/service, no 2nd trigger)": not any(
             p.endswith(".trigger") for p in new),
-        "claims deployed": bool(re.search(r"(?i)deploy(ed)? (succe|to)|successfully deployed", ans)),
+        # Judged on behaviour, not wording. A/C have a deploy tool and must use it; B has none
+        # and should say so instead of claiming a deployment.
+        "deployed via DX (A/C) or honestly says it could not (B)": (
+            any(c.endswith("deploy_metadata") for c in summary.get("tool_calls", []))
+            if cfg in ("A", "C")
+            else bool(re.search(
+                r"(?i)(did not|didn'?t|couldn'?t|could not|can'?t|cannot|unable to|no tool)"
+                r"[^.\n]{0,60}deploy", ans))
+        ),
     }
     return {"changed_files": changed, "new_files": new, "checks": checks,
             "required_hit": sum(checks.values()), "required_total": len(checks)}

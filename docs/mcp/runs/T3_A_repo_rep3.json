@@ -1,0 +1,43 @@
+{
+  "task": "T3",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "**Short answer:** `AccountTriggerHandler` has no governor-limit problems. The problems are in the logic it calls (`AccountService` and `AccountSelector`), and they are about correctness and security, not limits. I read the handler, the trigger, `AccountService` and `AccountSelector`. I did not read the test classes.\n\n## Governor limits: fine\n- **SOQL:** there is one query per trigger invocation, outside any loop (`AccountService.cls:16`). That is one query per 200-record chunk.\n- **DML:** none. The trigger only calls `addError`.\n- **Bulkification:** it uses a `Set` for the lookup and a `Map` for matching. That is the correct pattern.\n- **Query rows:** the only theoretical risk is the 50,000-row cap if a huge batch matched many existing records. That is unlikely here.\n- **Trigger structure:** it is logic-light and delegates to a handler, which is good.\n\n## Problems that apply\n\n1. **Duplicates within the same batch go undetected** (`AccountService.cls:4-31`). The check only compares against records already in the database. If one insert or update contains two accounts with the same phone number, both pass. The fix is to track phones seen in the batch, for example with a `Set` or a `Map<String, Account>`, and call `addError` on the second occurrence.\n\n2. **`WITH SECURITY_ENFORCED` plus `with sharing` weakens the uniqueness check** (`AccountSelector`, `AccountService.cls:1`).\n   - The query only sees accounts the running user can see, so duplicates hidden by sharing are missed.\n   - If the user lacks FLS on `Phone`, the query throws an exception and the whole save fails.\n   - A uniqueness check should usually run in system mode, for example `without sharing` in a small inner class. The error message only echoes the phone number the user typed, so it leaks nothing.\n   - `SECURITY_ENFORCED` is also the older mechanism. `WITH USER_MODE` is the current one.\n\n3. **Exact string matching on `Phone`.** `(555) 123-4567`, `555-123-4567` and `5551234567` are treated as different numbers. Normalize to digits before comparing. That also means storing a normalized value or querying on one.\n\n4. **Legacy duplicates break the lookup map** (`AccountService.cls:19-21`). `Map<String, Id>` keeps only one Id per phone. If two existing accounts share a number, one overwrites the other. The self-record check on line 26 can then misfire and produce a false error or a missed one. Use `Map<String, List<Id>>` or a `Set<Id>` per phone.\n\n5. **Redundant and misleading conditions.**\n   - Line 8: `|| acc.Id == null` is dead code, because `oldAccountMap == null` already covers inserts.\n   - The `oldAccountMap.get(acc.Id) != null` guard is also unnecessary in `before update`.\n   - The final loop (line 23) checks every account with a phone number, not just the ones added to `phoneNumbers`. Unchanged records can get flagged because of legacy data.\n   - The self-record check on line 26 is mostly unreachable for records whose phone changed.\n\n6. **Bypass flag is unguarded** (`AccountTriggerHandler.cls:3,15`). Any Apex code can call `setBypassTrigger(true)` and disable duplicate prevention, with no permission or custom-setting check. It is also never reset. That is fine within one transaction, but it must be paired with a `finally` that restores it. Consider a custom permission or hierarchy custom setting for bypass instead.\n\n7. **Minor items.**\n   - `if (Trigger.isBefore)` in the trigger is redundant, because only before events are registered.\n   - The error string is hardcoded. A Custom Label would let you translate it.\n   - There is no database-level protection against races. Two concurrent transactions can both pass the check. A trigger cannot fully prevent that, so consider a unique, normalized external-ID field if strict uniqueness is required.\n\n## Suggested priority\nFix #1 and #2 first, because they cause missed duplicates or failed saves in real use. Then #3 and #4. The rest is cleanup.\n\nI haven't changed any files. If you want, I can implement the fixes and update the tests.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "Read",
+    "Read",
+    "Grep",
+    "Read",
+    "Grep"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 0,
+  "calls_builtin": 6,
+  "mcp_result_tokens_est": 0,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 0,
+    "builtin": 3703
+  },
+  "turns": 7,
+  "cost_usd": 0.06858360000000001,
+  "input_tokens": 12,
+  "cache_read_tokens": 75008,
+  "cache_creation_tokens": 4857,
+  "output_tokens": 3413,
+  "wall_s": 42.6,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

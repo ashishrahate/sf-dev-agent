@@ -1,0 +1,36 @@
+{
+  "task": "T4a",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "I saved the decision to the sf-context project memory for the AgentforceOrg org. It's recallable now, so anyone on the team who queries this org's context will see it.\n\nIt reads: for complex Account logic, use an Apex trigger that delegates to a handler class, not a Flow, because the team owns the Apex skills.\n\nI added a note that simple, declarative-friendly cases aren't covered. That wasn't in your wording, so say so if you'd rather drop it.\n\nI saved it to this org only. If you want it to apply to every org in the tenant, I can save it again with `cross_org` turned on.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__memory_save"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 99,
+  "result_chars": {
+    "sf-context": 396,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 2,
+  "cost_usd": 0.022768999999999998,
+  "input_tokens": 4,
+  "cache_read_tokens": 17075,
+  "cache_creation_tokens": 3239,
+  "output_tokens": 639,
+  "wall_s": 10.1,
+  "grade": {
+    "required_hit": 1,
+    "required_total": 1,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

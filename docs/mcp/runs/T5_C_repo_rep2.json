@@ -1,0 +1,37 @@
+{
+  "task": "T5",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "No other Apex classes call `RecordSelectorController`. Only two components reference it, and both would break on a rename.\n\n**Callers**\n- **`RecordSelectorControllerTest`** (Apex test) calls `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails` directly. These calls are at lines 23, 43, 60, 91, 111, 125, 146 and 167. A rename would cause compile errors here.\n- **`recordSelector`** (LWC) imports three methods in `force-app/main/default/lwc/recordSelector/recordSelector.js:5-7`:\n  - `@salesforce/apex/RecordSelectorController.searchRecords`\n  - `@salesforce/apex/RecordSelectorController.saveSelectedRecords`\n  - `@salesforce/apex/RecordSelectorController.getSelectedRecordsDetails`\n\n**What would break on a rename**\n1. **The LWC.** Those import paths are plain strings that include the class name. The compiler won't flag them in your source, so the component would fail at deploy or build time because the Apex module can't be resolved.\n2. **The test class.** It would fail to compile, which blocks deployment if tests run.\n3. **Anything outside the index.** I searched the local source and the org index. Neither covers these places:\n   - Profile or permission set `classAccesses` entries. I didn't check `force-app` for them specifically.\n   - Flows or other metadata that call it by name.\n   - Code in other packages or orgs.\n\n**To rename it safely**\n1. Rename `RecordSelectorController.cls` and its `-meta.xml`, and change the class declaration.\n2. Update the three imports in `recordSelector.js`.\n3. Update the 8 call sites in the test class. Renaming the test class to match is optional.\n4. Grep for the old name in `profiles/` and `permissionsets/` and update any entries.\n5. Deploy the class, the LWC and the test together. Deploying the class alone leaves the LWC pointing at a class that no longer exists.\n\nI can make these edits if you want, but I'd need the new name.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "Grep"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 239,
+  "result_chars": {
+    "sf-context": 957,
+    "salesforce-dx": 0,
+    "builtin": 1833
+  },
+  "turns": 3,
+  "cost_usd": 0.030881000000000002,
+  "input_tokens": 4,
+  "cache_read_tokens": 29355,
+  "cache_creation_tokens": 4018,
+  "output_tokens": 893,
+  "wall_s": 16.6,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

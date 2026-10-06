@@ -109,7 +109,21 @@ _INVENTORY_QUERIES: dict[str, str] = {
 def _query_tooling(
     org_alias: str, query: str, timeout: int
 ) -> tuple[list[dict], str | None]:
-    """Run one Tooling-API SOQL query. Returns (records, error_message_or_None).
+    """Run one Tooling-API SOQL query. Returns (records, error_message_or_None)."""
+    return _run_query(org_alias, query, timeout, tooling=True)
+
+
+def _query_soql(
+    org_alias: str, query: str, timeout: int
+) -> tuple[list[dict], str | None]:
+    """Run one regular (non-Tooling) SOQL query, e.g. against EntityDefinition."""
+    return _run_query(org_alias, query, timeout, tooling=False)
+
+
+def _run_query(
+    org_alias: str, query: str, timeout: int, tooling: bool
+) -> tuple[list[dict], str | None]:
+    """Shared implementation. Returns (records, error_message_or_None).
 
     The records list is the raw `result.records` array from sf's --json output,
     so callers can read whichever fields the query selected.
@@ -118,7 +132,7 @@ def _query_tooling(
         _sf_exe(), "data", "query",
         "-q", query,
         "--target-org", org_alias,
-        "--use-tooling-api",
+        *(["--use-tooling-api"] if tooling else []),
         "--json",
     ]
     logger.info("Tooling query: %s", query)
@@ -164,6 +178,41 @@ def _reconstruct_object_api_name(
     if namespace_prefix:
         return f"{namespace_prefix}__{base}"
     return base
+
+
+_OBJECT_SUFFIXES = ("__c", "__e", "__mdt", "__b", "__x", "__kav")
+
+
+def _resolve_object_api_names(
+    org_alias: str, object_records: list[dict], timeout: int
+) -> dict[tuple[str, str], str]:
+    """Map (namespace, DeveloperName) -> real api name including its suffix.
+
+    Tooling `CustomObject` omits the suffix for every kind of custom object, so
+    platform events (`__e`) and custom metadata types (`__mdt`) would otherwise be
+    mistaken for `__c` objects and look "deleted" on every refresh. EntityDefinition
+    carries the true QualifiedApiName. On any failure the caller falls back to `__c`.
+    """
+    names = sorted({r.get("DeveloperName") for r in object_records if r.get("DeveloperName")})
+    resolved: dict[tuple[str, str], str] = {}
+    for i in range(0, len(names), 100):
+        chunk = names[i:i + 100]
+        quoted = ",".join("'" + n.replace("'", "") + "'" for n in chunk)
+        records, err = _query_soql(
+            org_alias,
+            "SELECT QualifiedApiName, DeveloperName, NamespacePrefix FROM EntityDefinition "
+            f"WHERE DeveloperName IN ({quoted})",
+            timeout,
+        )
+        if err:
+            logger.warning("EntityDefinition lookup failed (%s); assuming __c suffix", err)
+            return resolved
+        for rec in records:
+            qname = rec.get("QualifiedApiName") or ""
+            if qname.endswith(_OBJECT_SUFFIXES):
+                key = (rec.get("NamespacePrefix") or "", rec.get("DeveloperName") or "")
+                resolved.setdefault(key, qname)
+    return resolved
 
 
 def _fetch_custom_object_inventory(
@@ -218,8 +267,12 @@ def _fetch_custom_object_inventory(
         if parent_id and lmd:
             field_max_by_parent_id[parent_id] = lmd
 
+    resolved = _resolve_object_api_names(org_alias, object_records, timeout)
+
     for rec in object_records:
-        api_name = _reconstruct_object_api_name(
+        api_name = resolved.get(
+            (rec.get("NamespacePrefix") or "", rec.get("DeveloperName") or "")
+        ) or _reconstruct_object_api_name(
             rec.get("DeveloperName"), rec.get("NamespacePrefix")
         )
         if not api_name:
@@ -336,3 +389,35 @@ def compute_deltas(
             plan.to_delete.append(cid)
 
     return plan
+
+
+def fetch_flow_versions(
+    org_alias: str, timeout: int = 120
+) -> tuple[dict[str, dict], str | None]:
+    """Active/latest version info per flow, keyed by DeveloperName.
+
+    Retrieved flow source is the *latest* version, which may be a newer draft of a
+    flow whose previous version is still active and running.
+    """
+    records, err = _query_tooling(
+        org_alias,
+        "SELECT DeveloperName, ActiveVersion.VersionNumber, ActiveVersion.Status, "
+        "LatestVersion.VersionNumber, LatestVersion.Status FROM FlowDefinition",
+        timeout,
+    )
+    if err:
+        return {}, err
+    out: dict[str, dict] = {}
+    for rec in records:
+        name = rec.get("DeveloperName")
+        if not name:
+            continue
+        active = rec.get("ActiveVersion") or {}
+        latest = rec.get("LatestVersion") or {}
+        out[name] = {
+            "is_active": bool(active.get("VersionNumber")),
+            "active_version": active.get("VersionNumber"),
+            "latest_version": latest.get("VersionNumber"),
+            "latest_status": latest.get("Status"),
+        }
+    return out, None

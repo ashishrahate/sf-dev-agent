@@ -1,0 +1,38 @@
+{
+  "task": "T4b",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "Add it to the existing Apex trigger and handler. Don't create a new trigger or a Flow.\n\n**What's already there**\n- `AccountTrigger` (`before insert, before update`) calls `AccountTriggerHandler.beforeInsert(Trigger.new)`.\n- `AccountTriggerHandler` checks a `bypassTrigger` flag, then calls `AccountService.preventDuplicateAccounts(...)`.\n- `AccountService` holds the business logic, and `AccountSelector` holds the SOQL.\n- Tests are in `AccountTriggerHandler_Test`, `AccountService_Test` and `AccountTrigger_Test`.\n\n**Why Apex and not a Flow:** a saved team decision says complex Account logic goes in an Apex trigger with a handler class, not in Flows. It doesn't cover simple declarative automation.\n\n**How to add it**\n1. **Put the logic in `AccountService`.** Add a bulk-safe method, for example `AccountService.yourNewLogic(List<Account> newAccounts)`.\n2. **Call it from `AccountTriggerHandler.beforeInsert`.** Put the call after the `if (bypassTrigger) return;` line, so the bypass switch covers it.\n3. **Use a selector for any queries.** Add the SOQL to `AccountSelector`, following `selectByPhoneNumbers`: `with sharing`, `WITH SECURITY_ENFORCED`, and a set of inputs rather than a query per record.\n4. **Add tests.** Put service-level tests in `AccountService_Test` and an insert-path test in `AccountTriggerHandler_Test`. Include a bulk case of 200 records.\n\n**Which context to use**\n- **Before insert:** use it to set or default fields on the record, or to add validation errors. You can change `Trigger.new` directly with no extra DML.\n- **After insert:** use it to create related records or do work that needs the new `Id`. The trigger currently only declares `before insert, before update`, so you'd have to add `after insert` to the trigger and add an `afterInsert` method to the handler.\n- If the after-insert work updates Account records, add a recursion guard.\n\n**Check the existing Flow:** `Append_Billing_Country_to_Account_Name` is in `flows/`. If it's a record-triggered flow on Account insert, your new logic could interact with it. Examples are both writing `Name`, or relying on field values the other one sets.\n\nWhat should the new logic do? With that I can tell you whether it belongs before or after insert, and I can write the code and tests.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "Grep",
+    "Glob"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 2,
+  "mcp_result_tokens_est": 4011,
+  "result_chars": {
+    "sf-context": 16047,
+    "salesforce-dx": 0,
+    "builtin": 1812
+  },
+  "turns": 4,
+  "cost_usd": 0.0603544,
+  "input_tokens": 4,
+  "cache_read_tokens": 29352,
+  "cache_creation_tokens": 10584,
+  "output_tokens": 1214,
+  "wall_s": 19.1,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

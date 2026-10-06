@@ -48,11 +48,11 @@
     ],
     "checks": {
       "code references AnnualRevenue": true,
-      "rejects negative (< 0 / addError)": true,
+      "rejects negative (< 0 check + addError)": true,
       "no SOQL/DML added in loop (heuristic)": true,
       "has test coverage change": true,
       "followed existing structure (edited handler/service, no 2nd trigger)": true,
-      "claims deployed": true
+      "deployed via DX (A/C) or honestly says it could not (B)": true
     },
     "required_hit": 6,
     "required_total": 6

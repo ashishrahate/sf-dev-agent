@@ -1,0 +1,43 @@
+{
+  "task": "T3",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "## Review of AccountTriggerHandler\n\nI read the trigger, `AccountTriggerHandler`, `AccountService` and `AccountSelector`. The handler only delegates, so most findings sit in the service and selector it calls.\n\n### Governor limits: mostly fine\n- **SOQL in loops:** none. There is one query per transaction, and the phones are collected into a Set first.\n- **DML in loops:** none. The trigger is before-only and uses `addError`, which isn't DML.\n- **Bulk handling:** it takes `List<Account>` and `Map<Id, Account>` and handles a full 200-record batch with a single query.\n- **Query selectivity:** `Phone` isn't indexed by default, so `WHERE Phone IN :phoneNumbers` is a non-selective filter. With large Account volumes (over about 1M records), this can cause full table scans and \"non-selective query\" errors in triggers. Consider a custom indexed field, such as a normalized-phone external ID field, or ask Salesforce Support to index `Phone`.\n- **Heap and rows:** no concern. The query returns only `Id` and `Phone`. The 50,000-row limit could be hit if many existing accounts share a phone number, which is unlikely.\n\n### Bugs and anti-patterns\n1. **Duplicates within the same batch aren't detected** (`AccountService.cls:8-9`). If two accounts in one insert share a phone number, neither is flagged. The check only compares against records already in the database. Track phones seen in the batch with a Set or Map.\n2. **Redundant and misordered condition** (`AccountService.cls:8`).\n   - `acc.Id == null` is already covered by `oldAccountMap == null` on insert.\n   - It can never be true on update.\n   - The `oldAccountMap.get(acc.Id) != null` null-check is appropriate, but the whole expression is hard to read. Use `Trigger.isInsert` semantics or a small helper.\n3. **Duplicate-check logic on updates is flawed** (`AccountService.cls:19-20, 26`).\n   - `existingPhonesMap` stores only one Id per phone.\n   - If a phone matches several existing records, the last one wins. An update can then be wrongly allowed when the record's own Id is the one stored, even though another account also has that phone.\n   - Use `Map<String, Set<Id>>`, or exclude the current record in the query with `Id NOT IN :ids`.\n4. **Exact string matching on Phone.** `(555) 123-4567` and `555-123-4567` are treated as different numbers. Normalize before comparing. Also note that SOQL `IN` is case-insensitive but ignores formatting only if it's already identical.\n5. **`WITH SECURITY_ENFORCED` with `with sharing`.**\n   - A user who can't see every Account will miss duplicates they don't have access to. The duplicate check is then silently incomplete.\n   - Integration users or users who lack FLS on `Phone` will get a `QueryException`.\n   - For a uniqueness rule, consider `without sharing` in the selector, with a comment explaining why. Alternatively, use `WITH USER_MODE` if the sharing-aware behavior is intended.\n6. **Static `bypassTrigger` flag** (`AccountTriggerHandler.cls:3,15`).\n   - It has no reset guarantee. If code calls `setBypassTrigger(true)` and throws before resetting it, validation stays off for the rest of the transaction.\n   - Callers should reset it in a `finally` block.\n   - Consider a Custom Permission or Custom Metadata bypass instead, which is auditable and admin-controllable.\n   - The field uses lowercase `boolean`. Prefer `Boolean`.\n7. **Trigger structure:** `if (Trigger.isBefore)` is redundant, since the trigger only declares before events. The handler uses static methods, so it can't be mocked or extended. That's acceptable at this size, but it won't scale if after-events or more logic are added.\n8. **Race condition.** Two concurrent transactions can both pass the check and insert the same phone number. Code-based duplicate checks can't fully prevent this. Use a unique, indexed field, such as a normalized phone key with Unique set, if strict uniqueness is required.\n9. **Error message:** `acc.Phone.addError(...)` fails. `addError` should be called on the field via `acc.Phone.addError`, which doesn't compile for a String field. Use `acc.addError('Phone', '...')`, or `acc.Phone.addError` only if `Phone` is an sObject field token. The compliant form is `acc.addError('...')` for a record-level error, or `acc.Phone.addError('...')` on the sObject field. I haven't compiled this, so please confirm whether it deploys as written. If it does deploy, the existing tests will show it.\n\n### Priority\n1. Fix the in-batch duplicate gap and the single-Id map (items 1 and 3). These are correctness bugs.\n2. Decide the sharing and security-enforcement semantics (item 5).\n3. Address phone normalization and selectivity (items 4 and the selectivity point) if the Account volume is large.\n4. Harden the bypass flag (item 6).\n\nItem 9 is the one I'm least sure of. I wrote it from memory and didn't verify it. In Apex, `Account.Phone.addError(...)` on a record's field is valid, because `acc.Phone` there refers to a field and `addError` is available through the `SObject.addError(String fieldName, String msg)` pattern. Treat that item as unverified until you've deployed or run the tests.\n\nI can draft a corrected `AccountService` covering items 1, 3 and 4 if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "Read",
+    "Read",
+    "Glob",
+    "Read",
+    "Grep"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 0,
+  "calls_builtin": 6,
+  "mcp_result_tokens_est": 0,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 0,
+    "builtin": 4162
+  },
+  "turns": 7,
+  "cost_usd": 0.0603732,
+  "input_tokens": 12,
+  "cache_read_tokens": 74786,
+  "cache_creation_tokens": 5033,
+  "output_tokens": 2526,
+  "wall_s": 38.7,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

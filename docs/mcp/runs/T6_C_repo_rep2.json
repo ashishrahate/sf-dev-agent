@@ -1,0 +1,38 @@
+{
+  "task": "T6",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "The index was slightly out of date. It's current now.\n\nI ran an incremental rebuild against `AgentforceOrg`. The last build was 13 minutes old, and the status check can't detect edits made in the org since then, so the rebuild was the only way to be sure.\n\n**What changed:** one component was modified, `ApexClass:AccountSelector`. Nothing was added or removed.\n\n**Index state:**\n- I re-embedded `AccountSelector`, and the other 46 components were unchanged. All 47 are embedded, so semantic search reflects the new version.\n- The rebuild reported no parser or retrieve errors.\n- The rebuild said it fetched 33 components, but it listed only one as modified. I took the \"modified\" list as the real change set, and I didn't investigate the gap.\n\nI haven't looked at what changed inside `AccountSelector`. I can read the new source, or check what depends on it, if you want.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__build_metadata_index",
+    "mcp__sf-context__embed_metadata_index"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 420,
+  "result_chars": {
+    "sf-context": 1681,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.0330392,
+  "input_tokens": 8,
+  "cache_read_tokens": 62386,
+  "cache_creation_tokens": 3724,
+  "output_tokens": 565,
+  "wall_s": 58.4,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

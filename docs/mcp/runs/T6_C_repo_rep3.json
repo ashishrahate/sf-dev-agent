@@ -1,0 +1,38 @@
+{
+  "task": "T6",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "The index was out of date by one component, and I've refreshed it.\n\nThe last build was 30 minutes old and flagged as not stale. That flag only checks age and can't see edits made in the org, so I ran an incremental build to check.\n\n**What changed:** `ApexClass:AccountSelector` was modified in the org. Nothing was added or removed, and 3 components were unchanged. The build reported no parser or inventory errors.\n\nI also re-embedded the changed class, so semantic search covers its new version. Embedding coverage is 100% (1 re-embedded, 46 unchanged).\n\nThe build only reports which component changed, not what changed in it. If you want the new contents or the classes that depend on `AccountSelector`, I can pull its source and dependency graph.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__build_metadata_index",
+    "mcp__sf-context__embed_metadata_index"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 420,
+  "result_chars": {
+    "sf-context": 1683,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.0313798,
+  "input_tokens": 8,
+  "cache_read_tokens": 62389,
+  "cache_creation_tokens": 3644,
+  "output_tokens": 431,
+  "wall_s": 73.3,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "task": "T3",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "## Review of AccountTriggerHandler and its call chain\n\nThe handler is clean and bulk-safe. The problems are in the code it calls: `AccountService`, `AccountSelector` and the trigger.\n\n### Governor limits\n\n**Not violated:**\n- There is one SOQL query per trigger invocation, outside any loop, and no DML.\n- The query is filtered on a `Set`, so it is bulk-safe. At 200 records per batch it is well within the limits.\n\n**Possible issues:**\n1. **Query rows (50,000) and selectivity.** `Phone` is not indexed by default, so `WHERE Phone IN :phoneNumbers` on a large Account table may be non-selective. That risks slow queries or \"Non-selective query\" errors above roughly 200k records. Making Phone an External ID or requesting a custom index would help. A unique custom field is better still.\n2. **Large data loads.** In a bulk load, each 200-record chunk issues its own query. That is fine for limits but slow.\n\n### Anti-patterns and bugs\n\n1. **Duplicates inside the same batch are not detected.** The check only compares against rows already in the database. Two new accounts with the same phone in one insert both pass. A before-trigger can't see the other in-flight records, so you need an in-batch `Set` check too.\n2. **`WITH SECURITY_ENFORCED` is the wrong tool here.** The check runs as the running user. A user without field-level access to Phone, or with sharing restrictions, will not see duplicates they can't read (`with sharing`). Duplicate enforcement then becomes inconsistent. Run this query in `without sharing` or system mode, or use `WITH SYSTEM_MODE`. Otherwise `SECURITY_ENFORCED` throws an exception for users who lack Phone access.\n3. **Fragile condition.** `acc.Id == null` is tested last, after `oldAccountMap.get(acc.Id)`. It is redundant, because on insert `oldAccountMap` is already null. On update, a changed-to-null phone is skipped, which is fine.\n4. **Exact string matching.** `'111-111-1111'` and `'(111) 111-1111'` are treated as different numbers. Normalize the phone number first.\n5. **`existingPhonesMap` keeps only one Id per phone.** If several existing accounts share a number, only the last Id is kept. On update, the \"same record\" check can then let a real duplicate through or flag the wrong one.\n6. **Trigger and handler structure.**\n   - The trigger is a thin wrapper, which is good, but the `Trigger.isBefore` check is redundant given its events.\n   - The handler is all `static`, with no trigger-framework pattern. This is fine at this size but won't scale.\n   - `bypassTrigger` is a static boolean with no reset guarantee. If an exception happens between `setBypassTrigger(true)` and `false`, the bypass stays on for the rest of the transaction. Use a try/finally.\n   - The bypass is public and unrestricted, so any code can disable duplicate protection.\n7. **Race condition.** Two concurrent transactions can both pass the check and insert the same phone. Only a unique constraint prevents this. Triggers alone can't.\n8. **Tests.**\n   - `testBypassTrigger` and others don't assert state afterwards.\n   - `AccountTrigger_Test` tests nothing about behavior.\n   - `testBulkUpdateWithDuplicates` indexes `accountsToUpdate[0]` and `[1]` with no `ORDER BY`, so which account is which is not deterministic.\n   - There is no 200-record test through the trigger itself, and no test of the in-batch duplicate case from item 1.\n\n### Priorities\n1. Fix in-batch duplicates (1) and the multi-Id map (5).\n2. Resolve `SECURITY_ENFORCED` vs. system mode (2).\n3. Make the bypass use try/finally (6).\n4. Normalize phone numbers (4) and consider indexing Phone (limits #1).\n\nI haven't changed any code. I can draft the fixes for `AccountService` and the handler if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 4,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 5223,
+  "result_chars": {
+    "sf-context": 20893,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 5,
+  "cost_usd": 0.0743776,
+  "input_tokens": 8,
+  "cache_read_tokens": 39408,
+  "cache_creation_tokens": 11970,
+  "output_tokens": 1860,
+  "wall_s": 18.1,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}
