@@ -31,7 +31,6 @@ from sf_dev_agent.providers.base import (
 )
 from sf_dev_agent.tools.registry import ToolRegistry
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -215,7 +214,7 @@ def test_request_resume_sets_agent_resume_requested(
     from sf_dev_agent.agent import AgentLoop
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     # Seed a target task for the resume to point at.
@@ -258,7 +257,7 @@ def test_request_resume_rejects_unknown_task(
     from sf_dev_agent.agent import AgentLoop
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     provider = _ResumeIntentProvider(
@@ -281,7 +280,7 @@ def test_request_resume_rejects_cross_tenant_task(
     from sf_dev_agent.agent import AgentLoop
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     other_scope = MemoryScope(tenant_id="other-tenant", org_alias="OrgX")
@@ -313,7 +312,7 @@ def test_repl_dispatches_agentloop_resume_on_signal(
     from sf_dev_agent.repl import ReplSession
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     scope = MemoryScope(tenant_id=org.tenant_id, org_alias=org.org_alias)

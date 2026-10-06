@@ -44,7 +44,7 @@ def db_with_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     db = tmp_path / "wm.db"
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path",
+        "sf_context_engine.default_db_path",
         lambda: db,
     )
 
@@ -157,7 +157,7 @@ def test_list_with_no_in_flight_prints_friendly_message(
 ) -> None:
     db = tmp_path / "empty.db"
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path",
+        "sf_context_engine.default_db_path",
         lambda: db,
     )
     WorkingMemoryStore(db).close()  # create the schema; no tasks
@@ -202,7 +202,7 @@ def test_latest_with_no_in_flight_errors(
 ) -> None:
     db = tmp_path / "noinflight.db"
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path",
+        "sf_context_engine.default_db_path",
         lambda: db,
     )
     WorkingMemoryStore(db).close()

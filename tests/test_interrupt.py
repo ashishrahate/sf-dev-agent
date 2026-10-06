@@ -27,7 +27,6 @@ from sf_dev_agent.providers.base import (
     consume_stream,
 )
 
-
 # ---------------------------------------------------------------------------
 # InterruptListener — flag mechanics + non-TTY no-op
 # ---------------------------------------------------------------------------
@@ -130,7 +129,7 @@ def test_agent_loop_catches_interrupted_error_mid_stream(
     from sf_dev_agent.agent import AgentLoop
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     # The trick: pre-fire the listener flag immediately on __enter__ so the
@@ -176,7 +175,7 @@ def test_agent_loop_catches_keyboard_interrupt_mid_stream(
     from sf_dev_agent.agent import AgentLoop
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     class KbProvider(LLMProvider):
@@ -212,7 +211,7 @@ def test_agent_loop_skips_tools_when_interrupt_fires_after_stream(
     from sf_dev_agent.tools.registry import ToolRegistry
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     executed: list[str] = []

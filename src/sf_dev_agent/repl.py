@@ -37,13 +37,13 @@ from prompt_toolkit.keys import Keys
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
-
-from sf_dev_agent import repl_ui
-from sf_dev_agent.agent import AgentLoop
-from sf_dev_agent.index_freshness import (
+from sf_context_engine.index_freshness import (
     check_freshness,
     format_age_human,
 )
+
+from sf_dev_agent import repl_ui
+from sf_dev_agent.agent import AgentLoop
 from sf_dev_agent.memory import (
     MemoryScope,
     MemoryStore,
@@ -541,7 +541,7 @@ def format_status_dict(session: ReplSession) -> dict[str, str]:
     # Project-memory count for the current scope.
     mem_count = "—"
     try:
-        from sf_dev_agent.context import default_db_path
+        from sf_context_engine import default_db_path
         with MemoryStore(default_db_path()) as store:
             mem_count = str(sum(store.stats(
                 MemoryScope(tenant_id=org.tenant_id, org_alias=org.org_alias),
@@ -552,7 +552,7 @@ def format_status_dict(session: ReplSession) -> dict[str, str]:
     # Index freshness — repurpose the same line the agent's system prompt sees.
     freshness = "—"
     try:
-        from sf_dev_agent.context import default_db_path
+        from sf_context_engine import default_db_path
         f = check_freshness(default_db_path(), org.org_alias)
         if f.last_built_at is None:
             freshness = "not built"
@@ -718,7 +718,7 @@ def _print_alert_if_needed(session: ReplSession) -> None:
     issues: list[str] = []
 
     try:
-        from sf_dev_agent.context import default_db_path
+        from sf_context_engine import default_db_path
         f = check_freshness(default_db_path(), session.org.org_alias)
         if f.last_built_at is None:
             issues.append(
@@ -780,7 +780,7 @@ def launch_repl(
     # one-shot CLI path. Caller can pass their own for tests.
     own_working_memory = working_memory is None
     if working_memory is None:
-        from sf_dev_agent.context import default_db_path
+        from sf_context_engine import default_db_path
         working_memory = WorkingMemoryStore(default_db_path())
 
     session = ReplSession(

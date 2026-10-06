@@ -7,6 +7,12 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[manifest]
+members = [
+    "sf-context-engine",
+    "sf-dev-agent",
+]
+
 [[package]]
 name = "annotated-types"
 version = "0.7.0"
@@ -785,6 +791,28 @@ wheels = [
 ]
 
 [[package]]
+name = "sf-context-engine"
+version = "0.1.0"
+source = { editable = "packages/sf-context-engine" }
+dependencies = [
+    { name = "numpy" },
+    { name = "python-dotenv" },
+]
+
+[package.optional-dependencies]
+gemini = [
+    { name = "google-genai" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0.0" },
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+]
+provides-extras = ["gemini"]
+
+[[package]]
 name = "sf-dev-agent"
 version = "0.1.0"
 source = { virtual = "." }
@@ -794,6 +822,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "rich" },
+    { name = "sf-context-engine" },
 ]
 
 [package.optional-dependencies]
@@ -832,6 +861,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=15.0.0" },
+    { name = "sf-context-engine", editable = "packages/sf-context-engine" },
 ]
 provides-extras = ["anthropic", "openai", "gemini", "all"]
 

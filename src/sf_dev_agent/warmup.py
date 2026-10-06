@@ -37,12 +37,12 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.prompt import Prompt
-
-from sf_dev_agent.index_freshness import (
+from sf_context_engine.index_freshness import (
     check_freshness,
     is_warmup_skipped,
     mark_warmup_skipped,
 )
+
 from sf_dev_agent.models.schemas import OrgConnection
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ def prompt_warmup_if_needed(
         return False
 
     if db_path is None:
-        from sf_dev_agent.context import default_db_path
+        from sf_context_engine import default_db_path
         db_path = default_db_path()
     db_path = Path(db_path)
 
@@ -151,12 +151,12 @@ def run_warmup(
     embed_index, knowledge embedding still runs).
     """
     if db_path is None:
-        from sf_dev_agent.context import default_db_path
+        from sf_context_engine import default_db_path
         db_path = default_db_path()
     db_path = Path(db_path)
 
     # Lazy imports — keep `warmup` import-cheap so __main__ startup is fast.
-    from sf_dev_agent.context import (
+    from sf_context_engine import (
         build_index,
         create_embedder,
         embed_index,

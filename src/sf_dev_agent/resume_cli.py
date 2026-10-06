@@ -28,9 +28,9 @@ import sys
 
 from rich.console import Console
 from rich.table import Table
+from sf_context_engine.index_freshness import format_age_human
 
 from sf_dev_agent.agent import AgentLoop
-from sf_dev_agent.index_freshness import format_age_human
 from sf_dev_agent.memory import (
     TERMINAL_STATUSES,
     MemoryScope,
@@ -68,7 +68,7 @@ def run_resume_command(argv: list[str]) -> int:
     org = _build_org(org_alias, args)
     scope = MemoryScope(tenant_id=org.tenant_id, org_alias=org.org_alias)
 
-    from sf_dev_agent.context import default_db_path
+    from sf_context_engine import default_db_path
     db_path = default_db_path()
 
     if args.list:

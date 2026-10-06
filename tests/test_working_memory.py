@@ -71,7 +71,8 @@ def test_schema_idempotent(tmp_path: Path) -> None:
 
 def test_coexists_with_other_stores(tmp_path: Path) -> None:
     """Working memory shares the SQLite file with index, knowledge, and project memory."""
-    from sf_dev_agent.context import KnowledgeBase, MetadataIndex
+    from sf_context_engine import KnowledgeBase, MetadataIndex
+
     from sf_dev_agent.memory import MemoryStore
 
     db = tmp_path / "shared.db"

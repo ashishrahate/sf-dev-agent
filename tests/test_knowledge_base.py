@@ -7,20 +7,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pytest
-
-from sf_dev_agent.context import (
+from sf_context_engine import (
     KnowledgeBase,
     MockEmbedder,
     bundled_entries_dir,
 )
-from sf_dev_agent.context.knowledge.store import (
+from sf_context_engine.knowledge.store import (
     _parse_frontmatter,
 )
+
 from sf_dev_agent.models.schemas import OrgConnection
 from sf_dev_agent.tools.registry import ToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

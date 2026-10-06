@@ -248,7 +248,7 @@ def test_agent_streaming_renders_text_deltas_live(
     ])
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     agent = AgentLoop(
@@ -285,7 +285,7 @@ def test_agent_non_streaming_buffers_full_text(
     ])
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     agent = AgentLoop(
@@ -332,7 +332,7 @@ def test_agent_streaming_handles_tool_calls(
     ])
 
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
 
     agent = AgentLoop(

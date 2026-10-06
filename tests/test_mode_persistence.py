@@ -31,7 +31,6 @@ from sf_dev_agent.providers.base import (
     consume_stream,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -60,7 +59,7 @@ def _redirect_default_db(
     monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "ws"))
     (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path",
+        "sf_context_engine.default_db_path",
         lambda: tmp_path / "wm.db",
     )
 

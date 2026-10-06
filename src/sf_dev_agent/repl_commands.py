@@ -140,7 +140,7 @@ def cmd_tasks(session: ReplSession, argv: list[str]) -> ReplDirective:
 
     include_terminal = "--all" in argv or "--include-terminal" in argv
 
-    from sf_dev_agent.context import default_db_path
+    from sf_context_engine import default_db_path
     db_path = default_db_path()
 
     scope = MemoryScope(

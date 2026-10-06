@@ -42,7 +42,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from sf_dev_agent.memory.store import MEMORY_TYPES
+from sf_context_engine.memory.store import MEMORY_TYPES
 
 if TYPE_CHECKING:
     from sf_dev_agent.memory.working import WorkingMemoryStore

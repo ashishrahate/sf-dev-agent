@@ -1415,7 +1415,7 @@ class ToolRegistry:
         """Return the configured DB path, or the package default."""
         if self.index_db_path:
             return self.index_db_path
-        from sf_dev_agent.context import default_db_path
+        from sf_context_engine import default_db_path
         return default_db_path()
 
     def _index_missing_response(self, db_path: Path) -> dict[str, Any]:
@@ -1498,7 +1498,7 @@ class ToolRegistry:
         is class-level: trim to ~80 lines per hit. Pass 0 to get untrimmed
         bodies (useful when the agent specifically needs full code).
         """
-        from sf_dev_agent.context import MetadataIndex
+        from sf_context_engine import MetadataIndex
 
         db_path = self._resolve_index_db_path()
         if not db_path.exists():
@@ -1527,7 +1527,7 @@ class ToolRegistry:
         direction: str = "both",
     ) -> dict[str, Any]:
         """Return relationship edges for one component."""
-        from sf_dev_agent.context import MetadataIndex
+        from sf_context_engine import MetadataIndex
 
         if direction not in ("outgoing", "incoming", "both"):
             return {"error": f"Invalid direction: {direction!r}"}
@@ -1576,7 +1576,7 @@ class ToolRegistry:
         full_refresh: bool = False,
     ) -> dict[str, Any]:
         """Refresh the SQLite metadata index from the connected org."""
-        from sf_dev_agent.context import build_index
+        from sf_context_engine import build_index
 
         db_path = self._resolve_index_db_path()
         result = build_index(
@@ -1607,7 +1607,7 @@ class ToolRegistry:
         force: bool = False,
     ) -> dict[str, Any]:
         """Populate/refresh embeddings for indexed components."""
-        from sf_dev_agent.context import MetadataIndex, create_embedder
+        from sf_context_engine import MetadataIndex, create_embedder
 
         db_path = self._resolve_index_db_path()
         if not db_path.exists():
@@ -1648,7 +1648,7 @@ class ToolRegistry:
         force: bool = False,
     ) -> dict[str, Any]:
         """Auto-load bundled entries (if needed) and refresh embeddings."""
-        from sf_dev_agent.context import KnowledgeBase, create_embedder
+        from sf_context_engine import KnowledgeBase, create_embedder
 
         try:
             embedder = create_embedder()
@@ -1687,7 +1687,7 @@ class ToolRegistry:
         min_score: float = 0.0,
     ) -> dict[str, Any]:
         """Embed the query and rank knowledge entries by cosine similarity."""
-        from sf_dev_agent.context import KnowledgeBase, create_embedder
+        from sf_context_engine import KnowledgeBase, create_embedder
 
         limit = max(1, min(limit, 25))
 
@@ -1831,7 +1831,8 @@ class ToolRegistry:
         min_score: float = 0.0,
     ) -> dict[str, Any]:
         """Embed the query and rank memories in scope by cosine similarity."""
-        from sf_dev_agent.context import create_embedder
+        from sf_context_engine import create_embedder
+
         from sf_dev_agent.memory import MemoryStore
 
         limit = max(1, min(limit, 25))
@@ -1959,7 +1960,7 @@ class ToolRegistry:
 
     def _exec_check_index_freshness(self) -> dict[str, Any]:
         """Re-probe `index_runs` + components.embedding for the current org."""
-        from sf_dev_agent.index_freshness import (
+        from sf_context_engine.index_freshness import (
             check_freshness,
             format_freshness_line,
         )
@@ -2085,7 +2086,7 @@ class ToolRegistry:
         memory_type: str | None = None,
     ) -> dict[str, Any]:
         """Fan out to all four context layers, dedupe, graph-enrich, budget-trim."""
-        from sf_dev_agent.context import retrieve_context
+        from sf_context_engine import retrieve_context
 
         db_path = self._resolve_index_db_path()
         if not db_path.exists():
@@ -2112,7 +2113,7 @@ class ToolRegistry:
         min_score: float = 0.0,
     ) -> dict[str, Any]:
         """Embed the query and rank components by cosine similarity."""
-        from sf_dev_agent.context import MetadataIndex, create_embedder
+        from sf_context_engine import MetadataIndex, create_embedder
 
         db_path = self._resolve_index_db_path()
         if not db_path.exists():

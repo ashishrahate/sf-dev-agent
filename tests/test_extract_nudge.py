@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -20,7 +19,6 @@ from sf_dev_agent.memory.extraction import ExtractionResult
 from sf_dev_agent.models.schemas import OrgConnection
 from sf_dev_agent.providers.base import LLMProvider, LLMResponse
 from sf_dev_agent.repl import ReplSession
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -58,7 +56,7 @@ def session(
 ) -> ReplSession:
     """A ReplSession with a tmp DB for default_db_path() lookups."""
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
     return ReplSession(
         org=org, provider=_StubProvider(),

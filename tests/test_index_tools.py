@@ -11,8 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sf_context_engine import ingest_directory
 
-from sf_dev_agent.context import ingest_directory
 from sf_dev_agent.models.schemas import OrgConnection
 from sf_dev_agent.tools.registry import ToolRegistry
 

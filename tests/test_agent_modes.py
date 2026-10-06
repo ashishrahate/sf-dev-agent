@@ -25,10 +25,9 @@ import pytest
 
 from sf_dev_agent.agent import (
     AgentLoop,
-    _MODE_INSTRUCTIONS,
     _mode_instructions,
 )
-from sf_dev_agent.memory import MemoryScope, WorkingMemoryStore
+from sf_dev_agent.memory import WorkingMemoryStore
 from sf_dev_agent.models.schemas import AgentMode, OrgConnection
 from sf_dev_agent.providers.base import (
     LLMProvider,
@@ -37,7 +36,6 @@ from sf_dev_agent.providers.base import (
     StreamChunkKind,
     consume_stream,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -66,7 +64,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "ws"))
     (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: tmp_path / "wm.db",
+        "sf_context_engine.default_db_path", lambda: tmp_path / "wm.db",
     )
     return tmp_path
 

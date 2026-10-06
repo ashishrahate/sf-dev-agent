@@ -58,7 +58,7 @@ def session(
     """A ReplSession backed by a tmp working-memory DB."""
     db = tmp_path / "wm.db"
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: db,
+        "sf_context_engine.default_db_path", lambda: db,
     )
     wm = WorkingMemoryStore(db)
     s = ReplSession(
@@ -255,7 +255,6 @@ def test_dispatch_when_busy_surfaces_hint(
     """If the agent is mid-task (e.g. hung at AWAITING_APPROVAL), a new prompt
     raises BusyError and the REPL prints a hint pointing at /resume."""
     from sf_dev_agent.agent import BusyError
-
     from sf_dev_agent.models.schemas import Task, TaskStatus
 
     class _BusyAgent:
@@ -299,7 +298,9 @@ def test_agentloop_busy_gate_direct() -> None:
     up a provider — by directly mutating current_task."""
     from sf_dev_agent.agent import AgentLoop, BusyError
     from sf_dev_agent.models.schemas import (
-        OrgConnection, Task, TaskStatus,
+        OrgConnection,
+        Task,
+        TaskStatus,
     )
 
     org = OrgConnection(
@@ -594,7 +595,7 @@ def test_alert_silent_when_index_fresh_and_no_tasks(
 
     # Seed a recent successful run so check_freshness reads "fresh".
     # Use the canonical schema from context/schema.sql via MetadataIndex.
-    from sf_dev_agent.context import MetadataIndex
+    from sf_context_engine import MetadataIndex
     db = tmp_path / "wm.db"
     MetadataIndex(db).close()  # runs schema.sql, creates index_runs
 
@@ -706,7 +707,6 @@ def test_mode_command_sets_valid_mode(
 def test_mode_command_rejects_invalid(
     session: ReplSession, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from sf_dev_agent.models.schemas import AgentMode
 
     original = session.mode
     session._dispatch("/mode bogus")
@@ -1047,7 +1047,7 @@ def test_autosuggest_skipped_when_agent_busy(
 ) -> None:
     """`maybe_autosuggest_plan_mode` should no-op when the agent has an
     active task — the input is almost certainly a continuation."""
-    from sf_dev_agent.models.schemas import AgentMode, Task, TaskStatus
+    from sf_dev_agent.models.schemas import AgentMode
 
     session.mode = AgentMode.EXECUTION  # would normally trigger the suggest
 

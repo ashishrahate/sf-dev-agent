@@ -45,8 +45,7 @@ Public API — working memory:
 
 from __future__ import annotations
 
-from sf_dev_agent.memory.conversation_log import ConversationLog
-from sf_dev_agent.memory.store import (
+from sf_context_engine.memory.store import (
     MEMORY_TYPES,
     MemoryEmbedResult,
     MemoryRecallHit,
@@ -56,6 +55,8 @@ from sf_dev_agent.memory.store import (
     MergeCandidate,
     make_memory_id,
 )
+
+from sf_dev_agent.memory.conversation_log import ConversationLog
 from sf_dev_agent.memory.working import (
     TERMINAL_STATUSES,
     TaskRow,

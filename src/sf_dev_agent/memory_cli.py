@@ -23,18 +23,18 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
+from sf_context_engine.memory.export import MemoryExporter, default_export_dir
+from sf_context_engine.memory.promote import KNOWLEDGE_CATEGORIES, MemoryPromoter
 
 from sf_dev_agent.memory import (
     MemoryScope,
     MemoryStore,
     WorkingMemoryStore,
 )
-from sf_dev_agent.memory.export import MemoryExporter, default_export_dir
 from sf_dev_agent.memory.extraction import (
     ExtractedMemoryCandidate,
     MemoryExtractor,
 )
-from sf_dev_agent.memory.promote import KNOWLEDGE_CATEGORIES, MemoryPromoter
 from sf_dev_agent.providers import create_provider
 
 console = Console()
@@ -380,7 +380,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
 def _resolve_db_path(arg_path: str | None) -> Path:
     if arg_path:
         return Path(arg_path)
-    from sf_dev_agent.context import default_db_path
+    from sf_context_engine import default_db_path
     return default_db_path()
 
 

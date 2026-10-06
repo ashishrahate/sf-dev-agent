@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -90,10 +89,9 @@ class LLMAuditStore:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        schema_path = (
-            Path(__file__).resolve().parent / "context" / "schema.sql"
-        )
-        self._conn.executescript(schema_path.read_text(encoding="utf-8"))
+        from sf_context_engine.paths import SCHEMA_PATH
+
+        self._conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
 
     def close(self) -> None:
         self._conn.close()

@@ -10,8 +10,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from sf_context_engine import MockEmbedder
 
-from sf_dev_agent.context import MockEmbedder
 from sf_dev_agent.memory import (
     MEMORY_TYPES,
     MemoryRecord,
@@ -72,7 +72,7 @@ def test_opening_store_creates_memories_table(tmp_path: Path) -> None:
 
 def test_opening_alongside_metadata_index_shares_db(tmp_path: Path) -> None:
     """Memory + index live in the same SQLite file (one orchestrator fan-out)."""
-    from sf_dev_agent.context import MetadataIndex
+    from sf_context_engine import MetadataIndex
 
     db = tmp_path / "combined.db"
 
@@ -830,7 +830,7 @@ def test_decay_via_orchestrator_layer(
     tmp_path: Path, scope: MemoryScope
 ) -> None:
     """retrieve_context's memory layer inherits decay from MemoryStore.recall."""
-    from sf_dev_agent.context import retrieve_context
+    from sf_context_engine import retrieve_context
 
     db = tmp_path / "decay_orch.db"
     embedder = MockEmbedder(dim=64)
@@ -843,7 +843,7 @@ def test_decay_via_orchestrator_layer(
         _age_memory_in_days(store, stale.id, age_days=365)
 
     # Need an empty index for retrieve_context's existence check.
-    from sf_dev_agent.context import MetadataIndex
+    from sf_context_engine import MetadataIndex
     MetadataIndex(db).close()
 
     result = retrieve_context(
