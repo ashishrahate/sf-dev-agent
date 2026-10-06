@@ -1,0 +1,17 @@
+{
+  "servers": {
+    "sf-context": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory", "C:/Users/ashis/Desktop/AI Projects/SF DEV AGENT/sf-dev-agent",
+        "run", "sf-context-mcp", "--org", "AgentforceOrg"
+      ]
+    },
+    "salesforce-dx": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@salesforce/mcp", "--orgs", "AgentforceOrg", "--toolsets", "orgs,data,metadata,testing"]
+    }
+  }
+}
