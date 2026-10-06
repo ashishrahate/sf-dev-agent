@@ -1,0 +1,36 @@
+{
+  "task": "T5",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Only two things reference `RecordSelectorController`, and no other Apex class calls it.\n\n**Callers**\n- **`lwc/recordSelector/recordSelector.js:5-7`** is the only production caller. It imports three `@AuraEnabled` methods through `@salesforce/apex/RecordSelectorController.*`:\n  - `searchRecords`\n  - `saveSelectedRecords`\n  - `getSelectedRecordsDetails`\n- **`classes/RecordSelectorControllerTest.cls`** is the test class. It calls `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails` directly, at lines 23, 43, 60, 91, 111, 125, 146 and 167.\n\n**What breaks if you rename it**\n1. **The LWC imports.** The three import paths in `recordSelector.js` embed the class name as a string. They won't resolve, and the component fails to compile on deploy. Nothing flags this until you deploy.\n2. **The test class.** Every `RecordSelectorController.xxx(...)` call stops compiling. The test class name also mirrors the controller name, so you'd probably rename it too.\n3. **The files.** `RecordSelectorController.cls` and its `-meta.xml` have to be renamed together, and the class declaration on line 1 has to match.\n\n**What I didn't find**\n- No profile or permission set metadata in this project references the class by name. If your org grants class access through profiles or permission sets, check the org copies, because they may not be in this repo. Renaming the class would drop that access.\n- Nothing in the project refers to it dynamically, such as `Type.forName`.\n\n**Safe order**\n1. Rename the class and its meta file.\n2. Update the three imports in `recordSelector.js`.\n3. Rename the test class and update its references.\n4. Deploy everything together.\n\nIf you deploy to an org that already has the old class, the old class stays there until you delete it with a destructive change.\n\nI can make these edits if you give me the new name.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Grep"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 0,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 0,
+    "builtin": 1833
+  },
+  "turns": 2,
+  "cost_usd": 0.0260508,
+  "input_tokens": 4,
+  "cache_read_tokens": 21794,
+  "cache_creation_tokens": 3266,
+  "output_tokens": 862,
+  "wall_s": 17.9,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "task": "T5",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "No Apex classes call `RecordSelectorController` other than its own test class. The index shows two incoming references:\n\n| Referrer | Type | How it uses it |\n|---|---|---|\n| `RecordSelectorControllerTest` | Apex test class | Calls the class directly (179 lines) |\n| `recordSelector` | LWC bundle | Imports it through `apex_imports` |\n\nThe LWC is exposed on Record, App and Home pages. It reads `Account.Selected_Records__c` and `Case.Selected_Records__c`.\n\n**What would break if you rename it**\n- **`RecordSelectorControllerTest`:** it would fail to compile. Its references to the class name would need updating.\n- **`recordSelector` LWC:** the import would break, and the component would fail to deploy. The import looks like `@salesforce/apex/RecordSelectorController.<method>`. Each method import would need the new name.\n- **Deployments:** the Apex rename and the LWC and test edits have to ship in the same deployment. Otherwise the org will have a broken reference between them.\n- **Rename mechanics:** Salesforce has no rename operation. You create a new class, update the references, then delete the old one. If the old class is already in production, the delete needs a destructive changes manifest.\n\n**What the index can't see**\n- **Page layouts and Lightning pages:** these reference the LWC, not the Apex class, so they aren't affected. They would only matter if you renamed the LWC itself.\n- **Dynamic references:** the index would miss `Type.forName('RecordSelectorController')` calls or string-based references. I found none, but it only covers indexed metadata.\n- **Non-indexed metadata:** permission sets and profiles can grant Apex class access (`classAccesses`). If those files aren't in the index, check them yourself. They would need the new class name too.\n- **Aura or Flow:** I didn't see any referencing it. Flows can call `@InvocableMethod` classes, and the index didn't show any such edge.\n\nBefore you rename it, I can grep the local project files for `RecordSelectorController`. That would cover permission sets, profiles and string references. Do you want me to run it?",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 581,
+  "result_chars": {
+    "sf-context": 2325,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 3,
+  "cost_usd": 0.0265314,
+  "input_tokens": 4,
+  "cache_read_tokens": 11387,
+  "cache_creation_tokens": 3849,
+  "output_tokens": 885,
+  "wall_s": 9.9,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

@@ -48,3 +48,4 @@ htmlcov/
 sf-cli-update*
 *.log
 .salesforcedx-vscode-apex-debugger/
+.bench/

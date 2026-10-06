@@ -1,0 +1,38 @@
+{
+  "task": "T5",
+  "config": "C",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "No other Apex class calls `RecordSelectorController`. Two components reference it, according to the index (47 components, built 16 minutes ago):\n\n| Referrer | Type | How it uses it |\n|---|---|---|\n| `RecordSelectorControllerTest` | Apex test class | Calls the class directly. |\n| `recordSelector` | LWC bundle | Has it in its `apex_imports`. It's exposed on Record, App and Home pages and works with `Account.Selected_Records__c` and `Case.Selected_Records__c`. |\n\n**What would break if you rename it**\n\n1. **`recordSelector` LWC.** Its JS has `import \u2026 from '@salesforce/apex/RecordSelectorController.<method>'`. After a rename, that import no longer resolves and the component fails to deploy. Any page where it's placed would break too. You'd have to update each Apex import path in the JS.\n2. **`RecordSelectorControllerTest`.** It references the class by name, so it fails to compile until you update it. That also blocks deployments that run tests.\n3. **Metadata that names the class.** The index doesn't cover these:\n   - Profile or permission set `classAccesses` entries.\n   - Anything outside Apex and LWC, such as Aura components, Flows, or Visualforce pages.\n   - Other orgs or packages. Update these separately if you have any.\n\n**Caveats**\n\n- The index covers Apex, objects, flows, validation rules, record types and LWCs. It doesn't show profile or permission set access. Search your local `force-app` for the class name before renaming. You can also retrieve profiles and permission sets and grep them.\n- Dynamic references, such as `Type.forName('RecordSelectorController')`, may not appear in the dependency graph. The exact-name code search found only the three components above, so it doesn't look like any exist.\n\nI can run a SOQL query against `SetupEntityAccess` for permission sets that grant the class, or list the exact imported method names in the LWC. Do you want either?",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__index_status"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 677,
+  "result_chars": {
+    "sf-context": 2711,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.0301086,
+  "input_tokens": 4,
+  "cache_read_tokens": 23693,
+  "cache_creation_tokens": 4123,
+  "output_tokens": 887,
+  "wall_s": 17.9,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

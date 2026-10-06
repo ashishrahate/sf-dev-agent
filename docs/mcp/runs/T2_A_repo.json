@@ -1,0 +1,62 @@
+{
+  "task": "T2",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Accounts with a negative `AnnualRevenue` are now rejected on insert and update, and the change is deployed to AgentforceOrg. The deploy succeeded and all 18 tests passed, covering the new tests and the existing Account tests.\n\n- **Validation:** I added `AccountService.validateAnnualRevenue()`, which puts the error \"Annual Revenue cannot be negative.\" on the field. Zero and blank values are still allowed.\n- **Handler:** `AccountTriggerHandler.beforeInsert` and `beforeUpdate` now call it before the duplicate-phone check. The `bypassTrigger` flag skips it too, as it does for the existing check.\n- **Existing callers:** Nothing else changed. The trigger file and the method signatures are untouched.\n- **Tests:** I added four methods to `AccountTriggerHandler_Test`, the class the existing Account handler tests live in. They cover a negative value on insert, a negative value on update, a bulk insert with mixed valid and invalid records, and the bypass flag.\n\nNo default target org was set in the config, so I deployed to the only org configured, `AgentforceOrg` (`<org-username>`).",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "Glob",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Edit",
+    "Edit",
+    "Edit",
+    "Edit",
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__deploy_metadata"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 3,
+  "calls_builtin": 12,
+  "mcp_result_tokens_est": 1637,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 6551,
+    "builtin": 14816
+  },
+  "turns": 16,
+  "cost_usd": 0.1270152,
+  "input_tokens": 14,
+  "cache_read_tokens": 116136,
+  "cache_creation_tokens": 15735,
+  "output_tokens": 4082,
+  "wall_s": 42.3,
+  "org_restore": "redeploy FAILED:    at async run (C:\\\\Program Files\\\\sf\\\\client\\\\node_modules\\\\@oclif\\\\core\\\\lib\\\\main.js:97:16)\\n    at async file:///C:/Program%20Files/sf/client/bin/run.js:15:1\",\n  \"cause\": \"undefined\",\n  \"warnings\": [],\n  \"code\": \"InvalidProjectWorkspaceError\",\n  \"status\": 1,\n  \"commandName\": \"DeployMetadata\"\n}\n",
+  "grade": {
+    "changed_files": [
+      "classes\\AccountService.cls",
+      "classes\\AccountTriggerHandler.cls",
+      "classes\\AccountTriggerHandler_Test.cls"
+    ],
+    "new_files": [],
+    "checks": {
+      "code references AnnualRevenue": true,
+      "rejects negative (< 0 / addError)": true,
+      "no SOQL/DML added in loop (heuristic)": true,
+      "has test coverage change": true,
+      "followed existing structure (edited handler/service, no 2nd trigger)": true,
+      "claims deployed": true
+    },
+    "required_hit": 6,
+    "required_total": 6
+  }
+}

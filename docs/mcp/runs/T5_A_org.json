@@ -1,0 +1,42 @@
+{
+  "task": "T5",
+  "config": "A",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "I checked the org `AgentforceOrg` (`<org-username>`). No default target org is configured, so I used the only org listed. I didn't search local source files, because I only had org-query tools.\n\n## What references `RecordSelectorController`\n\nThe Tooling API dependency graph (`MetadataComponentDependency`) shows two references:\n\n| Component | Type | How it uses it |\n|---|---|---|\n| `RecordSelectorControllerTest` | ApexClass | Its test class |\n| `recordSelector` | LightningComponentBundle | An LWC, most likely through `@salesforce/apex/RecordSelectorController.<method>` imports |\n\nNo other Apex class calls it directly.\n\n## What would break if you rename it\n\n1. **`recordSelector` LWC:** its Apex imports would fail to resolve, so the component would fail to compile and deploy. The imports are in the `.js` file, and you'd need to update each one.\n2. **`RecordSelectorControllerTest`:** it would fail to compile. The test name would also no longer match the class it covers.\n3. **Anything that uses `recordSelector`:** pages, flows or other LWCs that embed it would break if the component fails to deploy.\n\n## What this search can't see\n\n- **Dynamic references:** `Type.forName('RecordSelectorController')` and similar string-based lookups aren't tracked in the dependency graph.\n- **Other orgs and packages:** anything outside this org that references the class.\n- **Local-only changes:** your local project might differ from the org.\n- **Dependency index:** it can lag behind recent saves.\n\nI couldn't search class bodies directly because `ApexClass.Body` can't be filtered in SOQL. If you want a firmer answer, I can grep your local `force-app` folder for the string once I have file-search access.\n\n## Safe rename order\n\n1. Rename the class and its test.\n2. Update the imports in `recordSelector`'s JS.\n3. Deploy all of them together in one deployment.\n\nBecause the class is already deployed, you'd also want to delete the old class from the org afterward.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 7,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 756,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 3027,
+    "builtin": 0
+  },
+  "turns": 8,
+  "cost_usd": 0.0587332,
+  "input_tokens": 12,
+  "cache_read_tokens": 59246,
+  "cache_creation_tokens": 5665,
+  "output_tokens": 2420,
+  "wall_s": 30.6,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

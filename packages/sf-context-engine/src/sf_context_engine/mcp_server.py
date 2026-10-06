@@ -181,7 +181,9 @@ def build_server(service: ContextService) -> FastMCP:
     def index_status() -> dict[str, Any]:
         """Is the local index built, how old is it, how much of it is embedded, and
         is the embedder real or a mock? Call this when results look empty or
-        stale."""
+        stale. Note: staleness is judged by age only and cannot detect recent
+        edits in the org; to verify the index is current, run
+        build_metadata_index (incremental) rather than relying on is_stale."""
         return service.index_status()
 
     @mcp.tool(annotations=_LOCAL_WRITE)
@@ -192,7 +194,8 @@ def build_server(service: ContextService) -> FastMCP:
     ) -> dict[str, Any]:
         """Build or refresh the local index from the org via the sf CLI (read-only
         against the org; writes only the local index). Incremental by default
-        (only changed components); full_refresh=true re-fetches everything. Can
+        (only changed components, so it is the right way to check "is the index
+        current?"); full_refresh=true re-fetches everything. Can
         take a minute or more on a large org. Requires the sf CLI and an
         authenticated org alias."""
         if _sf_cli_path() is None:

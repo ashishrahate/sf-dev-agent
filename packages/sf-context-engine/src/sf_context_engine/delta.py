@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from sf_context_engine.parsers.base import Parser
+from sf_context_engine.sfcli import sf_env, strip_ansi
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,8 @@ def _query_tooling(
         proc = subprocess.run(
             cmd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,  # never inherit an MCP server's stdio pipe
+            env=sf_env(),
             text=True,
             timeout=timeout,
         )
@@ -133,7 +136,7 @@ def _query_tooling(
         return [], f"query timed out after {timeout}s"
 
     try:
-        payload = json.loads(proc.stdout) if proc.stdout else {}
+        payload = json.loads(strip_ansi(proc.stdout)) if proc.stdout else {}
     except json.JSONDecodeError:
         return [], f"non-JSON response: {proc.stdout[-500:]!r}"
 

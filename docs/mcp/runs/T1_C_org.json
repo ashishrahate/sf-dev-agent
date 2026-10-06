@@ -1,0 +1,46 @@
+{
+  "task": "T1",
+  "config": "C",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "The index (47 components, built 13 minutes ago from `AgentforceOrg`) shows one Account trigger, one Account flow, and no Account validation rules.\n\n## Triggers\n| Component | Events | Calls |\n|---|---|---|\n| `AccountTrigger` | before insert, before update | `AccountTriggerHandler` |\n\n## Flows\n| Flow | Type | Status |\n|---|---|---|\n| `Append_Billing_Country_to_Account_Name` | Record-triggered, before save, on create and update | **Draft**, so it is not running |\n\nThe flow has no Apex actions and no subflows.\n\n## Validation rules\nNone. A search of the index for Account validation rules returned zero results.\n\n## Apex classes\n| Class | Role |\n|---|---|\n| `AccountTriggerHandler` | Trigger handler (`with sharing`) |\n| `AccountService` | Business logic (`with sharing`) |\n| `AccountSelector` | Query layer (`with sharing`) |\n| `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test`, `AccountSelector_Test` | Tests |\n| `RecordSelectorController` | Backs the `recordSelector` LWC. It uses generic `SObject`, so it isn't tied to Account in code. |\n\n## Lightning component\n`recordSelector` (LWC) is exposed on record, app and home pages. It imports `RecordSelectorController` and references `Account.Selected_Records__c` and `Case.Selected_Records__c`. It is the only component that references that field.\n\n## Dependencies\n```\nAccountTrigger (before insert/update)\n  \u2514\u2500 AccountTriggerHandler\n       \u2514\u2500 AccountService\n            \u2514\u2500 AccountSelector\n\nrecordSelector (LWC) \u2500 RecordSelectorController \u2500 (generic SObject)\n\nAppend_Billing_Country_to_Account_Name (Draft flow) \u2500 standalone\n```\n- The tests reference these classes:\n  - `AccountTriggerHandler_Test` references `AccountTriggerHandler`.\n  - `AccountService_Test` references `AccountService`.\n  - `AccountSelector_Test` references `AccountSelector`.\n  - `AccountTrigger_Test` references only `Name` and `Phone`, so it likely exercises the trigger through DML.\n- Nothing else in the index calls `AccountService` or `AccountSelector`.\n\n## Caveats\n- The Account object itself isn't in the index, so I couldn't pull its fields, record types or other object-level metadata.\n- The index may not have captured every metadata type. If you expect validation rules, I can check the org directly with a Tooling API query on `ValidationRule`.\n- If the flow is activated, it and `AccountTrigger` would both run before save on Account. The flow's name append and the Apex logic could then interact. I haven't read the flow or handler source to see whether they touch the same fields.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph"
+  ],
+  "calls_ctx": 8,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 1950,
+  "result_chars": {
+    "sf-context": 7802,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 9,
+  "cost_usd": 0.0967342,
+  "input_tokens": 8,
+  "cache_read_tokens": 42721,
+  "cache_creation_tokens": 17766,
+  "output_tokens": 1711,
+  "wall_s": 25.1,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says flow is draft/inactive": true,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": []
+  }
+}

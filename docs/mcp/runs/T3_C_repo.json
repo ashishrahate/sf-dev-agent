@@ -1,0 +1,46 @@
+{
+  "task": "T3",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "## Review of AccountTriggerHandler (and what it calls)\n\n**Verdict:** The handler itself is clean. Most of the real problems are in `AccountService` and `AccountSelector`, which it delegates to.\n\n### What the handler does right\n- It's a thin handler with no SOQL or DML of its own. The trigger has no logic and one trigger per object (`AccountTrigger.trigger:1`).\n- It's bulk-safe, because it passes the whole `Trigger.new` list.\n- It's `with sharing`, and it uses before-context, so `addError` needs no DML.\n- The bypass flag is a reasonable pattern.\n\n### Governor limits\nNo limit is violated in the common case. The call chain makes one SOQL query per trigger invocation, outside any loop, and does no DML.\n\nThere are residual risks:\n1. **Cascading queries.** There's one query per trigger invocation. With a 200-record batch that's fine. If another process re-fires the trigger in the same transaction, for example a flow or a Data Loader batch with chunked updates, the count accumulates toward the 100 SOQL limit. The risk is low.\n2. **Query row limit.** `selectByPhoneNumbers` has no `LIMIT`. If a phone value is shared by many existing accounts, the 50,000 row limit could be hit. That's unlikely, but a query for existence checks shouldn't return unbounded rows.\n3. **Non-selective query.** `WHERE Phone IN :phoneNumbers` filters on an unindexed standard field. On large Account tables (over about 200k rows) this can cause full table scans and \"non-selective query\" errors in the trigger context. Consider a custom indexed field, such as a normalized phone with an external ID or unique flag, or ask Salesforce Support to index `Phone`.\n\n### Anti-patterns and correctness bugs\n1. **Duplicates within the same batch aren't detected** (`AccountService.cls:23-31`). The check only compares against existing database records. Two new accounts in one insert with the same phone will both pass. This is the most significant functional gap.\n2. **Wrong detection when `existingPhonesMap` is built** (`AccountService.cls:19-21`). It maps phone to a single Id, so if several records share a phone, the last one wins. On an update, an account whose phone matches itself and another record could be skipped by the `== acc.Id` check and miss the duplicate.\n3. **Phone matching is exact and case/format-sensitive.** `(555) 123-4567` and `555-123-4567` won't match. Normalize before comparing. Also, SOQL string comparison is case-insensitive, but the Apex `Map` key lookup is case-sensitive. That's mostly harmless for digits, but not if phones include extensions like \"x\" versus \"X\".\n4. **Redundant condition** (`AccountService.cls:8`). `acc.Id == null` is always true for before insert and never true for update, so it's dead logic. Also, `oldAccountMap.get(acc.Id)` is called twice, so it's better to fetch once into a local variable.\n5. **`WITH SECURITY_ENFORCED` on a duplicate check** (`AccountSelector.cls:11`). If the running user can't see some accounts or lacks field access on `Phone`, the query throws an exception or misses duplicates. Duplicate prevention usually should see all records, so use `without sharing` for that query with a documented reason. Alternatively, use `WITH USER_MODE` if you do want user-level enforcement. `SECURITY_ENFORCED` is also the older option, and `USER_MODE` is the current recommendation.\n6. **Static bypass flag has no safeguards.** `bypassTrigger` stays set for the whole transaction until someone resets it. A caller that forgets to reset it silently disables duplicate prevention. Use try/finally in callers, and consider a custom permission or custom metadata kill switch that is auditable.\n7. **Lowercase `boolean`.** Salesforce convention is `Boolean`. This is a style issue only.\n8. **Duplicate rules are the declarative alternative.** Salesforce's built-in Matching and Duplicate Rules would cover this requirement without code, and handle fuzzy matching. It's worth confirming that the Apex approach is intended.\n\n### Suggested priority\n1. Detect duplicates within the batch (#1).\n2. Fix the single-Id map (#2).\n3. Decide on sharing/security mode for the query (#5).\n4. Normalize phone numbers and address selectivity (#3 and limit item 3).\n5. Clean up the minor items.\n\nI only read the code. I didn't check `AccountTriggerHandler_Test` for coverage of these cases. I can look at it, or draft the fixes, if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "mcp__sf-context__index_status",
+    "Read",
+    "mcp__sf-context__dependency_graph",
+    "Read",
+    "Glob",
+    "Read",
+    "Glob",
+    "Read"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 0,
+  "calls_builtin": 7,
+  "mcp_result_tokens_est": 382,
+  "result_chars": {
+    "sf-context": 1528,
+    "salesforce-dx": 0,
+    "builtin": 3416
+  },
+  "turns": 10,
+  "cost_usd": 0.0668952,
+  "input_tokens": 12,
+  "cache_read_tokens": 100476,
+  "cache_creation_tokens": 5924,
+  "output_tokens": 2308,
+  "wall_s": 29.3,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

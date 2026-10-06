@@ -1,0 +1,60 @@
+{
+  "task": "T2",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "I couldn't deploy: this session has no shell (Bash is disabled and I have no PowerShell or sf deploy tool), and the sf-context server is read-only. The code is written locally but nothing is in the org, and none of the tests have been run.\n\n**What I changed**\n- `AccountService.cls`: I added `validateAnnualRevenue(List<Account>)`. It calls `addError('Annual Revenue cannot be negative.')` on `AnnualRevenue` when the value is below 0. Null and zero are allowed.\n- `AccountTriggerHandler.cls`: `beforeInsert` and `beforeUpdate` now call the new validation before the duplicate check. Existing method signatures are unchanged, so `AccountTrigger` and the existing callers still work. The `bypassTrigger` flag also skips the new validation.\n- `AccountAnnualRevenue_Test.cls` (new, with its meta.xml at API 62.0): It has five tests covering negative revenue on insert and on update, allowed values (zero, null, positive), a mixed bulk insert, and the bypass flag.\n\n**Conventions followed:** This org's Account handler is a static handler that delegates to `AccountService`. It doesn't use the `TriggerHandler` base class from the knowledge base, so I didn't introduce one. I also kept the single existing `AccountTrigger`, and the test class follows the existing `*_Test` naming.\n\n**To deploy, run this from the project root:**\n```\nsf project deploy start --source-dir force-app/main/default/classes --test-level RunSpecifiedTests --tests AccountAnnualRevenue_Test --tests AccountTriggerHandler_Test --tests AccountTrigger_Test --tests AccountService_Test\n```\nIf you enable a shell tool for me, I can run it and report the results.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "Glob",
+    "Read",
+    "Read",
+    "Read",
+    "Edit",
+    "Edit",
+    "Edit",
+    "Write",
+    "Glob",
+    "Read",
+    "Write",
+    "Bash"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 12,
+  "mcp_result_tokens_est": 3985,
+  "result_chars": {
+    "sf-context": 15941,
+    "salesforce-dx": 0,
+    "builtin": 11220
+  },
+  "turns": 14,
+  "cost_usd": 0.1356402,
+  "input_tokens": 14,
+  "cache_read_tokens": 127701,
+  "cache_creation_tokens": 17843,
+  "output_tokens": 3870,
+  "wall_s": 35.1,
+  "grade": {
+    "changed_files": [
+      "classes\\AccountService.cls",
+      "classes\\AccountTriggerHandler.cls"
+    ],
+    "new_files": [
+      "classes\\AccountAnnualRevenue_Test.cls"
+    ],
+    "checks": {
+      "code references AnnualRevenue": true,
+      "rejects negative (< 0 / addError)": true,
+      "no SOQL/DML added in loop (heuristic)": true,
+      "has test coverage change": true,
+      "followed existing structure (edited handler/service, no 2nd trigger)": true,
+      "claims deployed": true
+    },
+    "required_hit": 6,
+    "required_total": 6
+  }
+}

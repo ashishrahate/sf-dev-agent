@@ -867,6 +867,12 @@ class ContextService:
             }
         else:
             out = {"index_built": True, **self.check_index_freshness()}
+            out["freshness_note"] = (
+                "is_stale compares the index age to a threshold only; it cannot see edits made "
+                "in the org since the last build. When the user asks whether the index is "
+                "current, or the code in question may have changed, call build_metadata_index "
+                "(incremental, fetches only changed components) instead of trusting is_stale."
+            )
         try:
             embedder = create_embedder()
             out["embedder"] = embedder.name

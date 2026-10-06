@@ -1,0 +1,42 @@
+{
+  "task": "T3",
+  "config": "A",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "## Review of AccountTriggerHandler\n\nI read the code from the org `AgentforceOrg`, the only authorized org, because no default org is set and there's no local copy. I reviewed the handler, `AccountTrigger`, `AccountService`, and `AccountSelector`. I didn't deploy or run any tests.\n\n### Governor limits: no problems\n- **SOQL and DML in loops:** none. `AccountService` collects the phone numbers into a `Set` and runs one query through `AccountSelector.selectByPhoneNumbers`. That's one SOQL query per transaction chunk.\n- **Bulkification:** the code handles `Trigger.new` as a list.\n- **Query selectivity:** `Phone` isn't indexed by default, so `WHERE Phone IN :phoneNumbers` can do a full table scan. On an org with more than about 200k Accounts, that risks \"non-selective query\" errors in triggers. This is the biggest practical risk. Consider a custom indexed field, such as a normalized-phone external ID or a Duplicate/Matching Rule.\n- **Row limit:** the query has no `LIMIT`. Matches are bounded by the 50k-row limit, which is fine at normal volumes.\n\n### Anti-patterns and bugs\n\n1. **Duplicates within the same batch aren't detected.** `AccountService` only compares against records already in the database. Two new Accounts in one insert with the same phone both pass. The bulk test only passes because its duplicates match pre-existing records. Fix: also track phones seen within `accounts`.\n2. **Update logic has a bug.** On insert, `oldAccountMap == null`, so every record is checked. On update, a record whose phone didn't change is skipped, which is correct. In the error loop, though, the self-match check `existingPhonesMap.get(acc.Phone) == acc.Id` only works when one existing record has that phone. `existingPhonesMap.put` overwrites on collision, so if two existing Accounts share a phone, the map keeps whichever came last. That can produce a false error or a missed one.\n3. **Redundant condition:** `|| acc.Id == null` is dead code. Before-insert records always have a null Id, and `oldAccountMap == null` already covers them. On update, `oldAccountMap.get(acc.Id) != null` is always true.\n4. **Phone format isn't normalized.** `111-111-1111` and `(111) 111-1111` count as different, so duplicates slip through. Normalize before comparing.\n5. **`WITH SECURITY_ENFORCED` is the wrong tool here.** A duplicate check should see all records regardless of the user's sharing and FLS. With `with sharing` plus `SECURITY_ENFORCED`, a user who can't see another owner's Account won't get a duplicate error. It also throws an exception if the user lacks field access to `Phone`. Decide deliberately: usually `without sharing` for the selector, or `WITH USER_MODE` if you want enforcement. `SECURITY_ENFORCED` is also the older option.\n6. **Bypass flag (`setBypassTrigger`):**\n   - It's a public static with no permission check, so any code can disable the duplicate rule.\n   - The state persists for the whole transaction unless every caller resets it, and a thrown exception skips the reset. Prefer a Custom Permission or Custom Metadata check, or wrap the call in `try/finally`.\n   - Production code never calls `setBypassTrigger`. Only tests do.\n7. **Trigger and handler structure:**\n   - The `if (Trigger.isBefore)` check is redundant, since the trigger only declares before events.\n   - The handler is all static methods, so it's hard to extend or mock. If you add after-events or more logic, move to a framework with a per-object instance handler, such as a `TriggerHandler` base class.\n   - Declare only the events you need, as you do now. That part is good.\n8. **Test quality:**\n   - `AccountTrigger_Test` only asserts that the Id is non-null, so it effectively tests nothing.\n   - `AccountTriggerHandler_Test` hardcodes names and phones and queries with `LIKE 'Test Account%'`. `accountsToUpdate[0]` and `[1]` have no `ORDER BY`, so the test depends on row order.\n   - `testBulkInsertWithDuplicates` covers only 4 records. `AccountService_Test` has a 200-record test, but it doesn't call through the trigger.\n   - Tests use `System.assert` instead of `Assert.areEqual` and `Assert.isTrue`.\n   - No test covers duplicates within the same batch (item 1).\n   - The `testBypassTrigger` reset isn't in a `finally`.\n\n### Priority\n1. In-batch duplicates (item 1) are a functional gap.\n2. The unindexed `Phone` filter (limits section) and the `SECURITY_ENFORCED` choice (item 5) can cause real failures in production.\n3. The bypass flag (item 6) is a safety issue.\n4. The rest is cleanup.\n\nI can draft fixes for items 1, 2, 5 and 6 plus matching tests if you want. I'd need your go-ahead before deploying anything to the org.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 5,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 5946,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 23784,
+    "builtin": 0
+  },
+  "turns": 6,
+  "cost_usd": 0.0885616,
+  "input_tokens": 8,
+  "cache_read_tokens": 36378,
+  "cache_creation_tokens": 13575,
+  "output_tokens": 2697,
+  "wall_s": 31.9,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

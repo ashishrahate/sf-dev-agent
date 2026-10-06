@@ -1,0 +1,38 @@
+{
+  "task": "T4b",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Extend the existing Account trigger and handler. Don't add a new trigger or a Flow.\n\n**What's already there**\n- `AccountTrigger` (before insert, before update) calls `AccountTriggerHandler.beforeInsert(Trigger.new)`.\n- `AccountTriggerHandler.beforeInsert` currently calls `AccountService.preventDuplicateAccounts(...)`. The handler also has a `bypassTrigger` switch.\n- Tests are in `AccountTriggerHandler_Test` and `AccountTrigger_Test`.\n- Your team's saved decision is to build complex Account automation as Apex triggers with a handler, not as Flows, and to extend what exists.\n\n**How to add the logic**\n1. **Put the logic in `AccountService`.** Add a new static method, for example `AccountService.applyInsertDefaults(List<Account>)`. This matches how `preventDuplicateAccounts` is done.\n2. **Call it from `AccountTriggerHandler.beforeInsert`.** Add it after the existing call, below the `bypassTrigger` check, so the bypass still covers it.\n   ```apex\n   public static void beforeInsert(List<Account> newAccounts) {\n       if (bypassTrigger) return;\n       AccountService.preventDuplicateAccounts(newAccounts, null);\n       AccountService.applyInsertDefaults(newAccounts);\n   }\n   ```\n3. **Choose the trigger event by what the logic does.**\n   - Setting or validating fields on the new record belongs in `before insert`. You can change `Trigger.new` directly, with no extra DML.\n   - Anything that needs the record `Id` or touches related records (Contacts, Tasks, Opportunities) needs `after insert`. That means adding `after insert` to the `AccountTrigger` event list. You'd also add an `afterInsert` method to the handler, and an `if (Trigger.isAfter)` branch in the trigger.\n4. **Bulkify.** Loop over the whole list. Put SOQL and DML outside the loops and collect IDs into sets or maps first.\n5. **Add tests** to `AccountTriggerHandler_Test`. Insert several Accounts in one call to check bulk behavior, and assert the result. Also test with `setBypassTrigger(true)`.\n\n**One thing to check:** there is a Flow, `Append_Billing_Country_to_Account_Name`, that probably runs on Account create. If your logic reads or writes `Name` or `BillingCountry`, check how the two interact. Before-save Flows run after before-triggers, so the Flow may overwrite or build on what you set.\n\nWhat should the logic do? If you tell me, I can write the service method, the handler change and the tests.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "mcp__sf-context__retrieve_context",
+    "Glob"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 2,
+  "mcp_result_tokens_est": 3827,
+  "result_chars": {
+    "sf-context": 15308,
+    "salesforce-dx": 0,
+    "builtin": 324
+  },
+  "turns": 4,
+  "cost_usd": 0.0558264,
+  "input_tokens": 4,
+  "cache_read_tokens": 29182,
+  "cache_creation_tokens": 9463,
+  "output_tokens": 1213,
+  "wall_s": 23.7,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

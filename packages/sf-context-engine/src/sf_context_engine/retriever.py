@@ -14,6 +14,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from sf_context_engine.sfcli import sf_env, strip_ansi
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +72,8 @@ def retrieve(
         proc = subprocess.run(
             cmd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,  # never inherit an MCP server's stdio pipe
+            env=sf_env(),
             text=True,
             timeout=timeout,
             cwd=str(target_dir),
@@ -84,7 +88,7 @@ def retrieve(
         )
 
     try:
-        payload = json.loads(proc.stdout) if proc.stdout else {}
+        payload = json.loads(strip_ansi(proc.stdout)) if proc.stdout else {}
     except json.JSONDecodeError:
         return RetrieveResult(
             success=False,
@@ -159,6 +163,8 @@ def retrieve_components(
         proc = subprocess.run(
             cmd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,  # never inherit an MCP server's stdio pipe
+            env=sf_env(),
             text=True,
             timeout=timeout,
             cwd=str(target_dir),
@@ -173,7 +179,7 @@ def retrieve_components(
         )
 
     try:
-        payload = json.loads(proc.stdout) if proc.stdout else {}
+        payload = json.loads(strip_ansi(proc.stdout)) if proc.stdout else {}
     except json.JSONDecodeError:
         return RetrieveResult(
             success=False,

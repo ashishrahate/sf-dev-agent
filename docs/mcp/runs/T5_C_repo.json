@@ -1,0 +1,37 @@
+{
+  "task": "T5",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "No other Apex class calls `RecordSelectorController`. Two components reference it, and the dependency index and a text search of the project agree.\n\n**Callers**\n- **`RecordSelectorControllerTest`** (Apex test) calls `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails` directly. These calls are at `RecordSelectorControllerTest.cls:23`, `43`, `60`, `91`, `111`, `125`, `146` and `167`.\n- **`recordSelector`** (LWC) imports all three methods in `recordSelector.js:5-7`:\n  - `@salesforce/apex/RecordSelectorController.searchRecords`\n  - `@salesforce/apex/RecordSelectorController.saveSelectedRecords`\n  - `@salesforce/apex/RecordSelectorController.getSelectedRecordsDetails`\n\n**What breaks if you rename the class**\n1. **The LWC fails to compile or deploy.** The `@salesforce/apex/...` import paths contain the class name as a string. A rename in Apex won't update them, so the bundle won't resolve. This is the main risk, because the component stops working at runtime.\n2. **The test class fails to compile.** The eight static calls above would all be unresolved.\n3. **The class file and its metadata must be renamed together.** That means `RecordSelectorController.cls` and `RecordSelectorController.cls-meta.xml`.\n\n**What I did not check**\n- The index and the search only cover this project's source. Anything in the org but not in the repo could also reference the class. That includes other LWC or Aura components, flows, or managed or unmanaged packages.\n- Profiles and permission sets can grant access to the class under `<classAccesses>`. The search found no match, so none is in this repo. Check the org if you suspect otherwise.\n- Any other metadata that names the class as a string, such as a custom button, would not show up as an Apex reference.\n\n**Steps for a safe rename**\n1. Rename the class, its meta file, and the test class if you want the names to match.\n2. Update the three import paths in `recordSelector.js`.\n3. Update the eight references in the test.\n4. Deploy everything together. Then delete the old class from the org, because a deploy adds the new name but doesn't remove the old one.\n\nI can make these edits if you give me the new name.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "Grep"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 239,
+  "result_chars": {
+    "sf-context": 957,
+    "salesforce-dx": 0,
+    "builtin": 1833
+  },
+  "turns": 3,
+  "cost_usd": 0.032273,
+  "input_tokens": 4,
+  "cache_read_tokens": 29185,
+  "cache_creation_tokens": 4067,
+  "output_tokens": 1016,
+  "wall_s": 19.5,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

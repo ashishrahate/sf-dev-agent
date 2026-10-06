@@ -46,7 +46,7 @@ Copy the matching file and adjust the alias and repo path:
 | Cursor | `configs/cursor.mcp.json` | `.cursor/mcp.json` |
 | VS Code (Copilot) | `configs/vscode.mcp.json` | `.vscode/mcp.json` |
 
-Each config starts **both** servers. For the A/B/C comparison in `TEST_PLAN.md`, delete the entry you want off.
+On Windows the DX server is launched through `cmd /c npx` (as in these files); on macOS/Linux use `"command": "npx"` with the same arguments. Each config starts **both** servers. For the A/B/C comparison in `TEST_PLAN.md`, delete the entry you want off.
 
 ## Tools (12, about 2,100 tokens of definitions)
 

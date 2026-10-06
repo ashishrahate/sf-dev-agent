@@ -1,0 +1,51 @@
+{
+  "task": "T1",
+  "config": "A",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "The org has one trigger, one flow and no validation rules on Account. I read the trigger, handler, service, selector and test classes. I didn't open the flow's definition or the bodies of the Lead, Case and scheduler classes.\n\nI used `<org-username>` (alias AgentforceOrg). It's the only org in the MCP allowlist, and no default target-org is configured.\n\n## Components on Account\n\n| Type | Name | Detail |\n|---|---|---|\n| Apex trigger | `AccountTrigger` | Active, before insert and before update |\n| Flow | `Append_Billing_Country_to_Account_Name` | Active, record-triggered, before-save (`AutoLaunchedFlow` / `RecordBeforeSave`) |\n| Validation rules | none | The Tooling API query returned 0 rows |\n\n## Classes involved\n\n| Class | Role |\n|---|---|\n| `AccountTriggerHandler` | Called by the trigger. It has a static `bypassTrigger` flag that `setBypassTrigger()` sets. |\n| `AccountService` | Holds `preventDuplicateAccounts()`, which blocks duplicate Phone values. |\n| `AccountSelector` | `selectByPhoneNumbers()` queries `Account WHERE Phone IN :phones` with `WITH SECURITY_ENFORCED`. |\n| `AccountTriggerHandler_Test` | Tests the trigger end to end (insert, update, bypass, bulk). |\n| `AccountService_Test` | Calls the service directly. |\n| `AccountSelector_Test` | Tests the selector. |\n| `AccountTrigger_Test` | Only checks that insert and update succeed. It asserts nothing about duplicates. |\n| `RecordSelectorController` | Not tied to the trigger. It builds dynamic SOQL on any object, and `'001'` maps to Account in its prefix map. Its test class is `RecordSelectorControllerTest`. |\n\n## Dependencies\n\n```\nAccount insert/update\n \u251c\u2500 Flow: Append_Billing_Country_to_Account_Name   (before-save)\n \u2514\u2500 AccountTrigger  (before insert, before update)\n      \u2514\u2500 AccountTriggerHandler.beforeInsert / beforeUpdate   (skipped if bypassTrigger)\n           \u2514\u2500 AccountService.preventDuplicateAccounts(new, oldMap)\n                \u2514\u2500 AccountSelector.selectByPhoneNumbers(phones)  \u2192 SOQL on Account\n                     \u2514\u2500 acc.Phone.addError('An Account with this phone number already exists: \u2026')\n```\n\n- **Duplicate check:** `AccountService` only checks Phone values that are new or changed. On update it skips a match when the existing record is the same record.\n- **Tests:** `AccountTriggerHandler_Test` and `AccountTrigger_Test` run the whole chain through DML. `AccountService_Test` and `AccountSelector_Test` cover the lower layers.\n- **Flow and trigger:** both run in the before-save phase on the same events. Salesforce runs before-save flows before before-triggers, so the trigger sees any Name change the flow makes. They don't call each other.\n\n## Things to check\n\n- **Invalid classes:** every Apex class returned `IsValid: false`, including the Account ones. That may only mean the Tooling API hasn't recompiled them. If it's real, it would break the trigger path, so I'd run the Apex tests to confirm.\n- **Phone matching:** the duplicate check compares Phone as an exact string, so `111-111-1111` and `1111111111` count as different.\n- **Duplicates within one batch:** the check only looks at records already in the database. Two new accounts in the same insert with the same phone won't be flagged against each other.\n- **Not inspected:** the Lead, Case and Case SLA classes may also reference Account. Say if you want me to search them and read the flow definition.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 13,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 11503,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 46012,
+    "builtin": 0
+  },
+  "turns": 14,
+  "cost_usd": 0.182065,
+  "input_tokens": 12,
+  "cache_read_tokens": 58635,
+  "cache_creation_tokens": 31641,
+  "output_tokens": 4375,
+  "wall_s": 44.5,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says flow is draft/inactive": false,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": []
+  }
+}
