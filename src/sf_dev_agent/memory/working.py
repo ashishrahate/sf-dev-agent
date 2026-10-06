@@ -44,7 +44,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sf_dev_agent.memory.store import MemoryScope
+from sf_context_engine.memory.store import MemoryScope
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +86,9 @@ class WorkingMemoryStore:
         self._conn.execute("PRAGMA foreign_keys = ON")
         # Ensures `tasks` and `conversation_messages` exist for DBs that
         # pre-date slice 2a.
-        schema_path = (
-            Path(__file__).resolve().parent.parent / "context" / "schema.sql"
-        )
-        self._conn.executescript(schema_path.read_text(encoding="utf-8"))
+        from sf_context_engine.paths import SCHEMA_PATH
+
+        self._conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_add_mode_column()
         self._migrate_add_pending_question_column()
 

@@ -1,0 +1,45 @@
+{
+  "task": "T1",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "The index has one trigger, one active flow, and a chain of Apex classes on Account. It has no validation rules on Account. It was built 16 minutes ago and covers 47 components.\n\n## Trigger\n**`AccountTrigger`** runs on before insert and before update. It calls `AccountTriggerHandler`.\n\n## Flow\n**`Append_Billing_Country_to_Account_Name`** is a before-save record-triggered flow on Account (create and update).\n- **Version mismatch:** v8 is active and is what runs. The latest version, v9, is a Draft, and the index holds the v9 source. Check v8 in the org before relying on what the index shows.\n- **No Apex:** it calls no Apex actions and no subflows.\n\n## Apex classes\n| Class | Role | References |\n|---|---|---|\n| `AccountTriggerHandler` | Handler. It has a static `bypassTrigger` flag, set through `setBypassTrigger`. | `AccountService` |\n| `AccountService` | `preventDuplicateAccounts` collects new or changed phone numbers. It queries for existing Accounts with those numbers and calls `addError` on `Phone` for duplicates. | `AccountSelector` |\n| `AccountSelector` | Query layer, `selectByPhoneNumbers`. | none |\n| `RecordSelectorController` | Used by the LWC below. It handles generic SObjects, not Account specifically. | none on Account |\n\nTest classes:\n- `AccountTrigger_Test`\n- `AccountTriggerHandler_Test`\n- `AccountService_Test`\n- `AccountSelector_Test`\n- `RecordSelectorControllerTest`\n\n## LWC\n`recordSelector` is exposed on record, app and home pages. It uses `Account.Selected_Records__c` and `Case.Selected_Records__c`, and imports `RecordSelectorController`.\n\n## Dependency chain\n```\nAccountTrigger \u2500\u25ba AccountTriggerHandler \u2500\u25ba AccountService \u2500\u25ba AccountSelector\nrecordSelector (LWC) \u2500\u25ba RecordSelectorController\nAppend_Billing_Country_to_Account_Name (flow): standalone, no Apex links\n```\n\n## Gaps and risks\n- **Validation rules:** the search returned none for Account. They may not be retrieved or indexed, so confirm in the org if you expect any.\n- **Flow and trigger order:** both fire before save, and the flow runs before the trigger. The flow edits the Name, while the trigger only checks Phone, so they don't conflict today. Neither is aware of the other.\n- **Duplicate check:** in `AccountService`, it compares exact phone strings, so formatting differences get through. Its condition `acc.Id == null` is redundant with the `oldAccountMap == null` check on insert.\n- **Flow versions:** the active version (v8) and the latest version (v9) differ, so what the index shows isn't necessarily what runs.\n\nI didn't check Account object fields, since `CustomObject:Account` isn't in the index. I also didn't check for other objects that might reference Account.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 7,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 2839,
+  "result_chars": {
+    "sf-context": 11359,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 8,
+  "cost_usd": 0.0565106,
+  "input_tokens": 8,
+  "cache_read_tokens": 29273,
+  "cache_creation_tokens": 8385,
+  "output_tokens": 1710,
+  "wall_s": 15.8,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": true,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": []
+  }
+}

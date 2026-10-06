@@ -1,0 +1,38 @@
+{
+  "task": "T5",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "No other Apex classes call `RecordSelectorController`. Only one test class and one LWC reference it. The dependency graph, the index search and a plain-text grep of the source all agree.\n\n**Callers**\n\n| Caller | Type | How it uses the controller |\n|---|---|---|\n| `RecordSelectorControllerTest` | Apex test class | Makes direct static calls to `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails` (`RecordSelectorControllerTest.cls:23-167`). |\n| `recordSelector` | LWC | Imports the same three methods through `@salesforce/apex/RecordSelectorController.*` (`recordSelector.js:5-7`). |\n\n**What would break if you rename it**\n\n1. **The `recordSelector` LWC would stop compiling or deploying.** The three import strings in `recordSelector.js` contain the class name as a literal. A rename doesn't update them, so the bundle would fail to resolve the imports. The component is exposed on Record, App and Home pages, so every page that uses it would be affected.\n2. **`RecordSelectorControllerTest` would fail to compile.** It has nine direct references to the class name, and the failure would block any deployment that includes the test.\n3. **The class's own declaration** (`RecordSelectorController.cls:1`) and its filename have to change together. The filename must match the class name, and the `-meta.xml` file needs renaming too.\n\n**What I checked and what I didn't**\n\n- I only searched the local source and the index. The index was last refreshed on 2026-10-06.\n- I did not check for references the index can't see. Examples are other metadata types, such as a Flow calling an invocable method, and dynamic references like `Type.forName('RecordSelectorController')`. The grep found none in the repo source, but anything in the org that isn't retrieved locally would not show up.\n\n**Rename checklist**\n\n- Rename the `.cls` and `.cls-meta.xml` files and the class declaration.\n- Update the three import paths in `recordSelector.js`.\n- Update the nine references in the test class. You could rename the test class too, for consistency.\n- Deploy everything in a single deployment, so the org is never left with an LWC pointing at a class that no longer exists.\n\nI can make these edits if you give me the new name.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "Grep"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 581,
+  "result_chars": {
+    "sf-context": 2325,
+    "salesforce-dx": 0,
+    "builtin": 1833
+  },
+  "turns": 4,
+  "cost_usd": 0.03234379999999999,
+  "input_tokens": 4,
+  "cache_read_tokens": 17049,
+  "cache_creation_tokens": 4704,
+  "output_tokens": 1011,
+  "wall_s": 10.7,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

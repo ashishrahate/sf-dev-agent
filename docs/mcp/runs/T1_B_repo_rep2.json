@@ -1,0 +1,45 @@
+{
+  "task": "T1",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "Here is what the index (built 4 minutes ago, 47 components) shows for Account.\n\n## Trigger\n- **`AccountTrigger`** runs before insert and before update. It calls `AccountTriggerHandler`.\n\n## Flow\n- **`Append_Billing_Country_to_Account_Name`** is a record-triggered flow, before-save, on create and update.\n  - **Version mismatch:** v8 is active and is what runs. The latest version, v9, is a Draft. The index holds the v9 source, so what I can see of the flow may not match what runs.\n  - It has no subflows and no Apex actions.\n\n## Validation rules\n- None. The index has no validation rules on Account.\n\n## Apex classes\n| Class | Role | Depends on |\n|---|---|---|\n| `AccountTriggerHandler` | Trigger handler (with sharing) | `AccountService` |\n| `AccountService` | Business logic (with sharing) | `AccountSelector` |\n| `AccountSelector` | Query layer (with sharing) | none |\n| `RecordSelectorController` | Controller for the LWC below (with sharing) | none |\n\nTest classes:\n- `AccountTrigger_Test`\n- `AccountTriggerHandler_Test` (references `AccountTriggerHandler`)\n- `AccountService_Test` (references `AccountService`)\n- `AccountSelector_Test` (references `AccountSelector`)\n- `RecordSelectorControllerTest`\n\n## LWC\n- **`recordSelector`** is exposed on record, app and home pages. It imports `RecordSelectorController`. It reads `Account.Selected_Records__c` and `Case.Selected_Records__c`.\n\n## Dependency chain\n```\nAccountTrigger \u2500\u2500\u25ba AccountTriggerHandler \u2500\u2500\u25ba AccountService \u2500\u2500\u25ba AccountSelector\n\nAppend_Billing_Country_to_Account_Name (flow, standalone, no edges)\n\nrecordSelector (LWC) \u2500\u2500\u25ba RecordSelectorController\n```\n\n## Things to know\n- **Name field:** the flow and the trigger path both fire before save on Account insert and update. The flow's name is \"Append Billing Country to Account Name\", so it likely edits `Name`. I haven't checked whether the handler or service also edits `Name`. Their source would show whether the two conflict.\n- **Dependency graph gaps:** the graph only tracks references between components. It doesn't show what each component does to Account records. The flow has no edges at all.\n- **Missing object metadata:** `Account` itself isn't indexed as a custom object, so I couldn't query its incoming dependencies directly. I built this list from search results and per-component graphs.\n- **`RecordSelectorController` and Account:** it only references `SObject` generically. It touches Account only through the LWC, so it may not be Account-specific.\n\nI can read the handler, service and flow source to check the `Name` overlap if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph"
+  ],
+  "calls_ctx": 7,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 2032,
+  "result_chars": {
+    "sf-context": 8129,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 8,
+  "cost_usd": 0.0499852,
+  "input_tokens": 6,
+  "cache_read_tokens": 29606,
+  "cache_creation_tokens": 7083,
+  "output_tokens": 1572,
+  "wall_s": 16.6,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": true,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": []
+  }
+}

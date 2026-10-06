@@ -1,0 +1,38 @@
+{
+  "task": "T4b",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Account already has a trigger and handler, so you add to those. Don't create a second trigger or a Flow.\n\n**What exists**\n- `AccountTrigger` fires on `before insert` and `before update`. It routes to `AccountTriggerHandler.beforeInsert(Trigger.new)`.\n- `AccountTriggerHandler.beforeInsert` currently has a bypass check, then calls `AccountService.preventDuplicateAccounts(newAccounts, null)`.\n- `AccountSelector` holds the SOQL (`WITH SECURITY_ENFORCED`).\n- Tests are in `AccountTriggerHandler_Test` and `AccountTrigger_Test`.\n\n**Why Apex**\n- A saved team decision says complex Account logic goes in Apex triggers with a handler, not Flows.\n- Multiple triggers on one object have undefined execution order, so keep to the single trigger.\n\n**How to add it**\n1. **Before-insert logic** (defaulting fields, validation): add a service method in `AccountService`. Call it from `AccountTriggerHandler.beforeInsert`, after the bypass check. In a before trigger you can set fields on `Trigger.new` directly, with no DML. Use `addError` for validation.\n2. **After-insert logic** (creating related records, callouts, publishing events): the trigger doesn't subscribe to `after insert` yet.\n   - Add `after insert` to the event list in `AccountTrigger`.\n   - Add an `else if (Trigger.isAfter && Trigger.isInsert)` branch.\n   - Add `AccountTriggerHandler.afterInsert(List<Account>)`, which also checks `bypassTrigger`.\n3. **Queries:** put them in `AccountSelector`, and keep them outside loops (bulk-safe).\n4. **Tests:** add cases to `AccountTriggerHandler_Test`. Insert a list of 200 records to check bulk behavior, and test the bypass flag.\n\n**Style note**\n`LeadTrigger` and `CaseTrigger` use `new XHandler().handle()`, while Account uses static methods. I'd keep Account's existing style rather than refactor it as part of this change.\n\nWhat should the logic do, and does it need to run before or after the record is saved? With that I can write it.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "mcp__sf-context__memory_recall",
+    "Glob"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 4242,
+  "result_chars": {
+    "sf-context": 16969,
+    "salesforce-dx": 0,
+    "builtin": 158
+  },
+  "turns": 4,
+  "cost_usd": 0.0535292,
+  "input_tokens": 4,
+  "cache_read_tokens": 16876,
+  "cache_creation_tokens": 10114,
+  "output_tokens": 969,
+  "wall_s": 14.3,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

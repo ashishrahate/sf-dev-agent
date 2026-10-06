@@ -1,0 +1,41 @@
+{
+  "task": "T3",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "## Review of AccountTriggerHandler\n\n`AccountTriggerHandler` is 18 lines and only delegates, so it has no limit problems of its own. I also read `AccountTrigger`, `AccountService` and `AccountSelector`, because the risks sit there. I haven't run anything in the org.\n\n### Governor limits: mostly fine\n- **SOQL in loops:** none. There is one query per transaction, and it runs only when the set of phone numbers is non-empty.\n- **DML in loops:** none. The trigger is before-only and uses `addError`, so it makes no DML calls.\n- **Bulkification:** the code works on collections (`Set`, `Map`, `Trigger.new`) and handles 200 records per batch correctly.\n- **Query rows (50,000 per transaction):** this is a minor risk. `Phone IN :phoneNumbers` has no `LIMIT` and no selectivity guard. `Phone` isn't indexed by default, so the query is non-selective and can scan a large Account table. A bulk load into an org with millions of Accounts could slow down or hit query timeouts.\n- **Cumulative use:** a trigger that runs this query in every transaction adds up with other automation on Account. It's still one query, so this is low risk.\n\n### Anti-patterns and bugs that do apply\n\n1. **Duplicates inside the same batch aren't detected** (`AccountService.cls:23-31`). The check only compares against records already in the database. Two new Accounts in one insert with the same phone number both pass. `testBulkInsertWithDuplicates` only covers duplicates against existing records, so it hides this gap.\n2. **The update self-match check is unreliable** (`AccountService.cls:26`).\n   - The map keeps one Id per phone number, so if several existing Accounts share a phone, the last one wins. That Id may be the record being updated, and the real duplicate is then skipped.\n   - The check runs only when `oldAccountMap != null`. On insert `acc.Id` is null, so it can't match anyway, which is fine.\n3. **`WITH SECURITY_ENFORCED` on a uniqueness check** (`AccountSelector.cls:11`). With `with sharing` plus `SECURITY_ENFORCED`, users who can't see some Accounts or can't read `Phone` won't see those duplicates.\n   - The check passes when it should fail, so uniqueness isn't actually enforced.\n   - A user without field access to `Phone` gets a thrown `QueryException` in the trigger instead.\n   - A uniqueness check usually runs in `without sharing` and doesn't enforce user field security.\n4. **Phone numbers are compared as raw strings.** `(111) 111-1111` and `111-111-1111` count as different, and so do values with different whitespace. Normalize before comparing.\n5. **Redundant trigger condition** (`AccountTrigger`). The `Trigger.isBefore` check is always true because the trigger only declares before events. This is harmless but adds noise.\n6. **Static bypass flag** (`AccountTriggerHandler.cls:3`). `setBypassTrigger` is a public global switch that anything in the transaction can flip. If a caller forgets to reset it, the bypass leaks to later DML in the same transaction. Prefer a `try/finally` pattern or custom permission or metadata control.\n7. **Not a full trigger framework.** There is no `TriggerHandler` base class, no `after` events and no recursion guard. This is acceptable for the current scope, but adding events later means restructuring the trigger.\n8. **A duplicate rule would be better.** Salesforce Duplicate Rules and Matching Rules do this natively, including on phone, without custom code. A unique external-key field or a normalized phone field with a unique constraint would be stronger still.\n\n### Test gaps\n- There is no test for duplicates within a single batch (item 1).\n- There is no test with more than 200 records.\n- There is no test for a user without `Phone` field access (item 3).\n- The assertions use `System.assert` rather than `Assert.*`.\n\n### Suggested priority\n1. Fix the `SECURITY_ENFORCED` and sharing behavior (item 3). It's a correctness bug that affects the whole check.\n2. Add in-batch duplicate detection and normalize phone numbers (items 1 and 4).\n3. Make the update self-match logic reliable (item 2).\n4. Replace the bypass flag with a safer pattern (item 6).\n\nI can make these changes if you want. I'd start with items 3, 1 and 4, and add tests for each.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "mcp__sf-context__code_search",
+    "Read",
+    "Read"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 3,
+  "mcp_result_tokens_est": 2571,
+  "result_chars": {
+    "sf-context": 10285,
+    "salesforce-dx": 0,
+    "builtin": 2338
+  },
+  "turns": 5,
+  "cost_usd": 0.06736020000000001,
+  "input_tokens": 8,
+  "cache_read_tokens": 71521,
+  "cache_creation_tokens": 8430,
+  "output_tokens": 1932,
+  "wall_s": 24.3,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

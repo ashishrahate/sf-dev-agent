@@ -1,0 +1,38 @@
+{
+  "task": "T4b",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "Account already has a trigger and handler, so add your logic to those. Don't create a second trigger.\n\n**What's there now**\n- `AccountTrigger` is `before insert, before update`. It calls `AccountTriggerHandler.beforeInsert(Trigger.new)` and `beforeUpdate(Trigger.new, Trigger.oldMap)`.\n- `AccountTriggerHandler` is `with sharing`. It has a static `bypassTrigger` flag and `setBypassTrigger()`. Each method delegates to `AccountService.preventDuplicateAccounts`, which blocks duplicate phone numbers.\n- Tests are in `AccountTrigger_Test` and `AccountTriggerHandler_Test`.\n\n**How to add it**\n\n1. **Pick the right event.**\n   - To set or default fields, or to validate, use `before insert`. Add a call in `AccountTriggerHandler.beforeInsert`. No DML is needed there, because changes to `Trigger.new` are saved automatically.\n   - If you need the record Id, or you're creating related records (Contacts, Tasks, and so on), use `after insert`. Add `after insert` to the trigger's event list. Then add an `afterInsert(List<Account>)` method to the handler and an `if (Trigger.isAfter)` branch in the trigger.\n\n2. **Put the logic in `AccountService`.** Add a new method such as `AccountService.yourLogic(List<Account>)`. The handler should only call it. This matches how `preventDuplicateAccounts` is done.\n   ```apex\n   public static void beforeInsert(List<Account> newAccounts) {\n       if (bypassTrigger) return;\n       AccountService.preventDuplicateAccounts(newAccounts, null);\n       AccountService.yourLogic(newAccounts);   // new\n   }\n   ```\n   The order of calls in the handler is the order they run, so place your call deliberately.\n\n3. **Bulkify it.** Trigger.new can hold up to 200 records. Don't put SOQL or DML inside loops. Collect the keys first, run one query, and use a Map.\n\n4. **Add tests** to `AccountTriggerHandler_Test`. Cover a single insert, a bulk insert of 200, and the bypass case. The existing tests show the style (`Database.insert(..., false)` with assertions on the save result).\n\n**Why not a Flow:** the team has recorded a decision to use Apex triggers with a handler for complex Account logic. A Flow is only appropriate if the logic is simple.\n\n**Other things to know**\n- `CaseTrigger` and `LeadTrigger` use `new XHandler().handle()`, while Account uses static methods. I'd keep Account's current style rather than refactor it as part of this change.\n- If you later need a recursion guard on update, use a static `Set<Id>`. It isn't needed for insert.\n\nWhat should the logic do? Once I know, I can say whether it belongs in `before insert` or `after insert`. I can also write the service method, the handler change and the tests.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__dependency_graph"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 4274,
+  "result_chars": {
+    "sf-context": 17097,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.0560428,
+  "input_tokens": 4,
+  "cache_read_tokens": 11554,
+  "cache_creation_tokens": 10196,
+  "output_tokens": 1294,
+  "wall_s": 12.2,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

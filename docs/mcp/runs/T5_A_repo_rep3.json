@@ -1,0 +1,36 @@
+{
+  "task": "T5",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "No other Apex class calls `RecordSelectorController`. It's referenced from two places, plus its own definition. I searched everything under the working directory.\n\n**References**\n\n| Where | How |\n|---|---|\n| `lwc/recordSelector/recordSelector.js:5-7` | Imports `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails` through `@salesforce/apex/RecordSelectorController.*` |\n| `classes/RecordSelectorControllerTest.cls` | Calls `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails` directly (lines 23\u2013167) |\n| `classes/RecordSelectorController.cls:1` | The class definition |\n\n**What breaks if you rename it**\n\n1. **The `recordSelector` LWC.** The three `@salesforce/apex/RecordSelectorController.\u2026` import paths are string-based. The deploy will fail on them, or the component won't compile. Update all three.\n2. **`RecordSelectorControllerTest`.** Every static call uses the old class name, so it won't compile. The test class name probably should change too.\n3. **The metadata file.** `RecordSelectorController.cls-meta.xml` has to be renamed along with the `.cls`. If you have a `.cls-meta.xml`, rename it in the same step.\n\n**What my search wouldn't catch**\n\n- **Profiles and permission sets.** These can grant Apex class access with `<apexClass>RecordSelectorController</apexClass>`. My search matched the string everywhere, so none exist in this folder. An org that has them retrieved separately would still need updating.\n- **Dynamic references and org-only metadata.** Anything outside this folder, such as flows or other orgs' code, wouldn't show up here.\n\nA rename also won't clean up the old class in the org on its own. The deploy creates the new class and leaves the old one in place. You'd need a destructive change to remove it.\n\nI haven't changed anything. I can do the rename across the `.cls`, meta file, test class and LWC imports if you want.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Grep"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 0,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 0,
+    "builtin": 1833
+  },
+  "turns": 2,
+  "cost_usd": 0.0258008,
+  "input_tokens": 4,
+  "cache_read_tokens": 21794,
+  "cache_creation_tokens": 3266,
+  "output_tokens": 837,
+  "wall_s": 16.7,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

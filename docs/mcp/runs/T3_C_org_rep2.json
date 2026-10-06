@@ -1,0 +1,41 @@
+{
+  "task": "T3",
+  "config": "C",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "## Review of `AccountTriggerHandler` (and the code it calls)\n\nThe handler itself is only 18 lines. It follows the usual pattern: one trigger, a thin handler, logic in `AccountService`, and the query in `AccountSelector`. The governor-limit risks are in the downstream classes. I read all four classes: the trigger, the handler, `AccountService` and `AccountSelector`.\n\n### What is done well\n- **Bulkified.** `AccountService.preventDuplicateAccounts` collects phones into a Set and runs one SOQL query per trigger invocation. There is no SOQL or DML inside a loop.\n- **Thin trigger and handler.** The trigger has no logic. It is before-only and uses `addError`, so no extra DML is needed.\n- **`with sharing` on all classes.** The query has `WITH SECURITY_ENFORCED`.\n\n### Problems that apply\n\n1. **Duplicates within the same batch are not detected.** This is a correctness gap that comes from the query-only approach. If two new Accounts in one insert share a phone number, and no existing record has it, both pass. `AccountService` only compares against records already in the database. The test `testBulkInsertWithDuplicates` doesn't catch this because its duplicates match pre-existing records. Fix: track phones seen in the current batch in the loop.\n\n2. **Governor limits under heavy bulk loads.** One query is safe for SOQL query count. The risks are different:\n   - **Row limit (50,000).** `Phone IN :phoneNumbers` has no `LIMIT`. If many Accounts share a phone number, such as placeholder values like \"000-000-0000\", the query could return a large number of rows.\n   - **Selectivity.** `Phone` is not indexed. On an org with large Account data volumes, the filter is non-selective, which can cause a full table scan. In triggers this can raise \"Non-selective query against large object type\" errors above about 200k Accounts. Consider an indexed field (external ID or custom unique field), a Duplicate/Matching Rule, or a normalized phone field.\n\n3. **Dead and incorrect condition in the change check.**\n   ```apex\n   oldAccountMap == null || (...Phone != acc.Phone) || acc.Id == null\n   ```\n   `acc.Id == null` is always true in before insert, which `oldAccountMap == null` already covers. On update, `oldAccountMap.get(acc.Id) != null` is always true. It works but is redundant noise.\n\n4. **Update self-match check is only partly correct.** The `continue` for the same record uses a single `Map<String, Id>`, so only one Id per phone is kept. If several existing Accounts share a phone, the map keeps the last one. If it isn't the record being updated, a self-match could be misreported as a duplicate, or a real duplicate hidden. Use `Map<String, Set<Id>>` or a list.\n\n5. **Phone format isn't normalized.** \"(111) 111-1111\" and \"111-111-1111\" are treated as different. This weakens the duplicate check and is a common data-quality pitfall.\n\n6. **Static bypass flag has weak controls.**\n   - `setBypassTrigger` is public and unrestricted, so any code can disable the duplicate check.\n   - Static state persists for the whole transaction, so forgetting to reset it silently disables validation for later operations. The test resets it manually.\n   - Consider a Custom Permission or Custom Metadata bypass, or `try/finally` around callers.\n   - Static state also means it can't be unit-tested per-context, and it is inconsistent with a recursion guard (none exists, though none is needed here because the trigger is before-only with no DML).\n\n7. **Minor: unused events and thin context handling.** The trigger checks `Trigger.isBefore` and `isInsert`/`isUpdate` inside a trigger that only declares those events. The checks are harmless but redundant. A case-sensitivity or null/blank-string (`''`) phone check is also missing: `acc.Phone != null` lets empty strings through to the query.\n\n8. **Test coverage gaps.** `AccountTrigger_Test` uses unique phones and only checks insertion. The tests don't cover same-batch duplicates, 200+ record DML through the real trigger, or the multiple-existing-duplicates case.\n\n### Not problems\n- No SOQL/DML in loops.\n- No hardcoded IDs.\n- No `without sharing`.\n- No recursion risk.\n- No CPU concern at 200 records.\n\n### Priority\n1. Same-batch duplicate detection (real functional bug).\n2. `Map<String, Set<Id>>` for self-match.\n3. Selectivity and indexing plan for `Phone`, or switch to a Duplicate Rule.\n4. Harden the bypass mechanism.\n5. Clean up the redundant conditions and add the missing tests.\n\nI can draft the revised `AccountService` and tests if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 4,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 5220,
+  "result_chars": {
+    "sf-context": 20882,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 5,
+  "cost_usd": 0.0820132,
+  "input_tokens": 8,
+  "cache_read_tokens": 64006,
+  "cache_creation_tokens": 11979,
+  "output_tokens": 2128,
+  "wall_s": 26.3,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

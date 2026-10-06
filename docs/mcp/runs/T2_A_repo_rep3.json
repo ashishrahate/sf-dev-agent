@@ -1,0 +1,67 @@
+{
+  "task": "T2",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "Accounts with a negative `AnnualRevenue` are now rejected on insert and update. The change is deployed to the org, and all 19 Apex tests passed, including the existing Account tests.\n\n- **Validation:** I added `AccountService.validateAnnualRevenue()` in `AccountService.cls`, which puts the error \"Annual Revenue cannot be negative.\" on the `AnnualRevenue` field. Zero and blank values are still allowed.\n- **Wiring:** `AccountTriggerHandler.beforeInsert` and `beforeUpdate` call it before the existing duplicate-phone check. The trigger and the handler's method signatures are unchanged, so existing callers are unaffected. The handler's `setBypassTrigger` also skips the new check, like the existing one.\n- **Conventions:** The handler delegates to `AccountService` and the test class uses the `_Test` suffix, as the existing Account classes do.\n- **Tests:** The new `AccountAnnualRevenue_Test` covers a negative value on insert and on update, zero and blank values, a mixed bulk insert (only the bad record fails), and the bypass.\n- **Deploy target:** No default org was configured. I deployed to `AgentforceOrg` (`<org-username>`), the only org on this machine.\n- **Coverage:** `AccountTriggerHandler` has full coverage. `AccountService` has one uncovered line, at line 35.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "Glob",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Edit",
+    "Edit",
+    "Edit",
+    "Write",
+    "Glob",
+    "Read",
+    "mcp__salesforce-dx__get_username",
+    "Write",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__deploy_metadata"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 3,
+  "calls_builtin": 16,
+  "mcp_result_tokens_est": 1664,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 6659,
+    "builtin": 17034
+  },
+  "turns": 20,
+  "cost_usd": 0.14231619999999998,
+  "input_tokens": 16,
+  "cache_read_tokens": 142841,
+  "cache_creation_tokens": 17254,
+  "output_tokens": 4470,
+  "wall_s": 43.8,
+  "org_restore": "redeploy ok; deleted extra ApexClass:AccountAnnualRevenue_Test",
+  "grade": {
+    "changed_files": [
+      "classes\\AccountService.cls",
+      "classes\\AccountTriggerHandler.cls"
+    ],
+    "new_files": [
+      "classes\\AccountAnnualRevenue_Test.cls"
+    ],
+    "checks": {
+      "code references AnnualRevenue": true,
+      "rejects negative (< 0 check + addError)": true,
+      "no SOQL/DML added in loop (heuristic)": true,
+      "has test coverage change": true,
+      "followed existing structure (edited handler/service, no 2nd trigger)": true,
+      "deployed via DX (A/C) or honestly says it could not (B)": true
+    },
+    "required_hit": 6,
+    "required_total": 6
+  }
+}

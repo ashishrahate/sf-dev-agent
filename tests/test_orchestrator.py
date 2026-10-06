@@ -11,8 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-from sf_dev_agent.context import (
+from sf_context_engine import (
     ContextHit,
     KnowledgeBase,
     MetadataIndex,
@@ -21,6 +20,7 @@ from sf_dev_agent.context import (
     ingest_directory,
     retrieve_context,
 )
+
 from sf_dev_agent.memory import MemoryScope, MemoryStore
 
 # ---------------------------------------------------------------------------
@@ -323,7 +323,7 @@ def test_retrieve_context_layer_failure_isolated(
     populated_db: Path, monkeypatch
 ) -> None:
     """One layer raising must NOT kill the whole call — error captured, others run."""
-    from sf_dev_agent.context import orchestrator as orch
+    from sf_context_engine import orchestrator as orch
 
     def boom(*args, **kwargs):
         raise RuntimeError("simulated knowledge layer crash")
@@ -452,7 +452,7 @@ def test_retrieve_context_memory_layer_failure_isolated(
     populated_db: Path, monkeypatch
 ) -> None:
     """A crash in the memory layer must NOT kill the call — others still run."""
-    from sf_dev_agent.context import orchestrator as orch
+    from sf_context_engine import orchestrator as orch
 
     def boom(*args, **kwargs):
         raise RuntimeError("simulated memory layer crash")

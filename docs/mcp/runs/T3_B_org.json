@@ -1,0 +1,41 @@
+{
+  "task": "T3",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "**Review of `AccountTriggerHandler`** (`AccountTrigger` \u2192 `AccountTriggerHandler` \u2192 `AccountService` \u2192 `AccountSelector`). I read all four classes but didn't run anything against the org.\n\n## Governor limits: mostly fine\n- **SOQL in loops:** not present. There is one query per trigger invocation, through `AccountSelector.selectByPhoneNumbers`, and it only runs when there are phones to check.\n- **DML:** none. `addError` is used correctly in a before trigger.\n- **Bulkification:** correct. It collects a `Set`, queries once and uses a `Map` for lookups. The 201-record test covers this.\n- **Query selectivity (the one real limit risk):** `WHERE Phone IN :phoneNumbers` filters on a standard field that, as far as I know, isn't indexed by default. On an Account table with hundreds of thousands of rows, this can hit a \"non-selective query\" error in the trigger context. It also reads up to 50k rows per transaction. Consider a custom-indexed normalized phone field, or check this against your Account volume.\n\n## Anti-patterns and correctness problems\n1. **Duplicates inside the same batch are missed.** The check only compares against rows already in the database. Two new accounts with the same phone in one insert both pass. Track phones seen in the loop to catch this.\n2. **`with sharing` plus `WITH SECURITY_ENFORCED` weakens the integrity check.** Records the user can't see are invisible, so duplicates hidden by sharing slip through. A user without FLS on `Phone` gets a query exception, which blocks the Account save. A uniqueness check should usually run in system mode, in an `inherited sharing` or `without sharing` selector. If you do want the security check, `WITH USER_MODE` is the current approach.\n3. **The bypass flag is unsafe** (`AccountTriggerHandler.cs:3`).\n   - `setBypassTrigger` is a public static switch that anyone can flip.\n   - It stays set for the rest of the transaction if the caller doesn't reset it, and nothing enforces a reset (no `try/finally`).\n   - A custom permission or custom metadata bypass is safer and can be audited.\n4. **Map collisions in `AccountService`.** `existingPhonesMap` keeps one Id per phone. If several existing accounts share a phone, later ones overwrite earlier ones. The \"same record\" `continue` check is also effectively dead code: on update, the phone has changed, so the stored record can't match itself.\n5. **Weak phone matching.** The comparison is exact-string and case-sensitive, so `111-111-1111` and `(111) 111-1111` are treated as different numbers. Normalize the phone before comparing.\n6. **Redundant conditions.** `acc.Id == null` is always true in before-insert, and `Trigger.isBefore` is redundant because the trigger only declares before events.\n7. **No concurrency protection.** Two simultaneous transactions can both pass the check and insert the same phone. Only a unique field or a Duplicate Rule closes that gap. Consider the declarative **Duplicate Management** features before keeping custom code.\n8. **Handler structure.** The handler is all static methods with no base class or framework. This is fine at its current size, but it doesn't scale if you add after-events or more logic. There is also no recursion guard, though nothing currently needs one.\n\n## Tests\n- The tests use legacy `System.assert*`. Prefer the `Assert` class.\n- `testBulkUpdateWithDuplicates` has confusing setup. `acc2.Phone = acc1.Phone` relies on query order that has no `ORDER BY`.\n- No test sends 200+ records through the actual trigger. The 201-record bulk test calls the service directly.\n- Nothing tests in-batch duplicates (item 1), the sharing or FLS behavior (item 2), or bypass cleanup (item 3).\n\n## Priority\nFix items 1, 2 and 3 first. They affect correctness and security, not just style. Then decide whether the custom-code approach is worth keeping (item 7) and check selectivity (see the Governor limits section).\n\nI can draft the fixes for 1\u20133 if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 4,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 5879,
+  "result_chars": {
+    "sf-context": 23519,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 5,
+  "cost_usd": 0.089393,
+  "input_tokens": 8,
+  "cache_read_tokens": 38445,
+  "cache_creation_tokens": 13042,
+  "output_tokens": 2952,
+  "wall_s": 31.4,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

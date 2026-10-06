@@ -1,0 +1,38 @@
+{
+  "task": "T5",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "No other Apex class calls `RecordSelectorController`. Only a test class and one LWC reference it. The index and a text search of the repo agree.\n\n**References**\n\n| Component | Where | How |\n|---|---|---|\n| `RecordSelectorControllerTest` (Apex) | `RecordSelectorControllerTest.cls`, lines 23, 43, 60, 91, 111, 125, 146, 167 | Direct static calls to `searchRecords`, `saveSelectedRecords` and `getSelectedRecordsDetails` |\n| `recordSelector` (LWC) | `lwc/recordSelector/recordSelector.js`, lines 5\u20137 | Imports `@salesforce/apex/RecordSelectorController.searchRecords`, `.saveSelectedRecords` and `.getSelectedRecordsDetails` |\n\n**What breaks if you rename it**\n\n1. **The `recordSelector` LWC breaks.** The three `@salesforce/apex/RecordSelectorController.*` imports are resolved by class name, and the class name is inside the import string. Deploying the renamed class without updating them fails the bundle's compile. The component is exposed on Record, App and Home pages, so any page using it would be affected.\n2. **`RecordSelectorControllerTest` stops compiling.** It has 8 direct references to the old name. A compile failure in a test class can also block deployments that run tests.\n3. **The class file and its metadata.** You'd need to rename `RecordSelectorController.cls` and `RecordSelectorController.cls-meta.xml` together, and update the declaration on line 1.\n\n**Things the index may not catch**\n- **Permissions.** Profiles and permission sets can grant access to the class under `classAccesses`. I didn't check these. Search the repo for `<apexClass>RecordSelectorController</apexClass>` and update any matches. Otherwise users lose access to the Apex methods.\n- **Dynamic references.** Calls through `Type.forName('RecordSelectorController')` would not show up in the dependency graph. The text search found no such strings.\n- **Org vs. local.** The index was built from the org, and the grep covered only your local `force-app`. They agree here, but a deploy rename leaves the old class in the org unless you delete it with a destructive change.\n\n**Safe rename order:**\n1. Rename the class and its meta file.\n2. Update the test class.\n3. Update the three LWC imports.\n4. Update any permission set or profile entries.\n5. Deploy everything together, with a destructive change for the old class name.\n\nI can make these edits if you give me the new name.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "Grep"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 581,
+  "result_chars": {
+    "sf-context": 2325,
+    "salesforce-dx": 0,
+    "builtin": 1833
+  },
+  "turns": 4,
+  "cost_usd": 0.0332798,
+  "input_tokens": 4,
+  "cache_read_tokens": 16879,
+  "cache_creation_tokens": 4704,
+  "output_tokens": 1108,
+  "wall_s": 11.4,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

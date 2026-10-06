@@ -1,0 +1,49 @@
+{
+  "task": "T1",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "The index has 47 components. It holds one Account trigger, one Account flow, and no validation rules.\n\n## Trigger\n**`AccountTrigger`** runs on before insert and before update. It calls only `AccountTriggerHandler`.\n\n## Flow\n**`Append_Billing_Country_to_Account_Name`** is a before-save record-triggered flow on Account, firing on create and update.\n- Version 8 is active and is what runs. The latest version, v9, is a Draft, and the index holds v9's source.\n- It has no subflows and no Apex actions, so the dependency graph shows no edges for it.\n\n## Validation rules\nNone are indexed. Searches for Account validation rules and for `errorConditionFormula` both returned nothing. The duplicate-phone check is enforced in Apex with `addError`, not in a validation rule.\n\n## Apex classes\n| Class | Role |\n|---|---|\n| `AccountTriggerHandler` | Calls `AccountService.preventDuplicateAccounts` on before insert and before update. It has a static `setBypassTrigger` switch. |\n| `AccountService` | `preventDuplicateAccounts` collects new or changed phone numbers and looks up existing accounts. It then adds the error \"An Account with this phone number already exists\" to the Phone field. |\n| `AccountSelector` | `selectByPhoneNumbers` is the query layer. |\n| `RecordSelectorController` | Used by the LWC below. It handles generic `SObject`s, so it is not Account-specific. |\n\nTests: `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test`, `AccountSelector_Test` and `RecordSelectorControllerTest`.\n\n## LWC\n`recordSelector` is exposed on record, app and home pages. It reads `Account.Selected_Records__c` and `Case.Selected_Records__c`, and it imports `RecordSelectorController`.\n\n## Dependency chain\n```\nAccountTrigger \u2500\u25b6 AccountTriggerHandler \u2500\u25b6 AccountService \u2500\u25b6 AccountSelector\n                                                 \u25b2 \u25b2\n                      AccountService_Test \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518 \u2514\u2500\u2500 (AccountTriggerHandler)\n\nAppend_Billing_Country_to_Account_Name (flow)   \u2014 standalone, no edges\nrecordSelector (LWC) \u2500\u25b6 RecordSelectorController \u2014 separate chain\n```\n\n## Things to check\n- **Ordering:** both the before-save flow and the before trigger run on Account saves. Salesforce runs before-save flows before before-triggers, so the trigger sees the flow's name changes. The duplicate check uses only Phone, so I don't expect a conflict.\n- **Draft v9:** it differs from the running v8. Check whether it is meant to be activated.\n- **Duplicate check:** it matches phone numbers exactly as strings, so formatting differences will slip through. The `acc.Id == null` clause is redundant for inserts, and the check is not bulk-safe against duplicates within the same batch.\n- **Dependency graph gaps:** it records class-to-class and trigger-to-class references. It does not link the flow to the trigger, and it has no `Account` object node. The flow and trigger relationship above comes from their metadata, not from graph edges.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 11,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 2864,
+  "result_chars": {
+    "sf-context": 11457,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 12,
+  "cost_usd": 0.0842498,
+  "input_tokens": 10,
+  "cache_read_tokens": 36629,
+  "cache_creation_tokens": 13691,
+  "output_tokens": 2214,
+  "wall_s": 23.1,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": true,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": []
+  }
+}

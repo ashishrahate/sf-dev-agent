@@ -1,0 +1,51 @@
+{
+  "task": "T1",
+  "config": "A",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "# Account object inventory (org `AgentforceOrg`)\n\nI used `<org-username>` (alias AgentforceOrg). It's the only org in the allowlist, and no default target org is configured.\n\n## Summary\n\n| Type | Count | Items |\n|---|---|---|\n| Apex triggers | 1 | `AccountTrigger` |\n| Record-triggered flows | 1 | `Append_Billing_Country_to_Account_Name` |\n| Validation rules | 0 | The Tooling API returned none for any object, so there are none on Account. |\n| Apex classes (production) | 3 | `AccountTriggerHandler`, `AccountService`, `AccountSelector` |\n| Apex test classes | 4 | `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test`, `AccountSelector_Test` |\n| Other classes that reach Account | 1 | `RecordSelectorController` (generic, via dynamic SOQL) |\n\n## Components\n\n**`AccountTrigger`** (active) fires on `before insert` and `before update`. It calls `AccountTriggerHandler.beforeInsert(Trigger.new)` or `beforeUpdate(Trigger.new, Trigger.oldMap)`.\n\n**`Append_Billing_Country_to_Account_Name`** (active, version 8, API 62) is a before-save flow on Account, run on create and update.\n- If `BillingCountry` is blank, it does nothing.\n- If `Name` already ends with ` - <country>`, it does nothing.\n- Otherwise it sets `Name` to `Name - BillingCountry`.\n\n**`AccountTriggerHandler`**\n- It has a static `bypassTrigger` flag, set through `setBypassTrigger(bool)`.\n- Both handler methods delegate to `AccountService.preventDuplicateAccounts`.\n\n**`AccountService.preventDuplicateAccounts`**\n- It collects phone numbers that are new or changed.\n- It looks up existing Accounts through `AccountSelector`.\n- It calls `addError` on `Phone` (\"An Account with this phone number already exists\") when another record has the same number.\n- This is the org's only duplicate check, and it is done in Apex rather than as a validation rule.\n\n**`AccountSelector.selectByPhoneNumbers`** queries `Id, Phone` where `Phone IN :set`, using `WITH SECURITY_ENFORCED`.\n\n**`RecordSelectorController`** is not Account-specific. It runs dynamic SOQL on any object name passed in and maps the `001` ID prefix to Account. It does `update` on a record, so it fires the Account trigger and flow when the target is an Account.\n\n## Dependencies\n\n```\nAccount insert/update\n \u2502\n \u251c\u25001\u2500 Flow: Append_Billing_Country_to_Account_Name   (before-save, runs before before-triggers)\n \u2502       rewrites Account.Name\n \u2502\n \u2514\u25002\u2500 Trigger: AccountTrigger (before insert, before update)\n         \u2514\u2500 AccountTriggerHandler  (bypass flag)\n              \u2514\u2500 AccountService.preventDuplicateAccounts\n                   \u2514\u2500 AccountSelector.selectByPhoneNumbers \u2192 SOQL on Account\n\nRecordSelectorController.saveSelectedRecords \u2192 update <Account> \u2192 triggers both of the above\n\nTests:\n AccountTrigger_Test         \u2192 trigger (insert/update smoke tests)\n AccountTriggerHandler_Test  \u2192 trigger \u2192 handler \u2192 service \u2192 selector (includes bypass and bulk cases)\n AccountService_Test         \u2192 service \u2192 selector\n AccountSelector_Test        \u2192 selector\n```\n\nThe Lead and Case triggers and their classes (`LeadTriggerHandler`, `CaseTriggerHandler` and the rest) don't touch Account. The other flows in the org are managed-package or template flows, and none of them target Account.\n\n## Things worth a look\n\n1. **The flow's description doesn't match its configuration.** The description says it \"only runs when Name or BillingCountry changes\", but the start element has no entry conditions or filters. It runs on every Account save. The `EndsWith` check is the only thing preventing duplicate suffixes.\n2. **The flow and the duplicate check don't depend on each other.** The flow only changes `Name`, and the trigger only reads `Phone`. They run in sequence, but there's no data coupling.\n3. **The duplicate check has limits.**\n   - It queries the database only, so two accounts in the same batch with the same new phone number both pass.\n   - `acc.Id == null` is evaluated after the `oldAccountMap == null` branch, so it never adds anything.\n   - `WITH SECURITY_ENFORCED` means a user without field access to `Phone` makes the query throw an exception, which blocks the save.\n4. **`AccountTrigger_Test` has no real assertions about trigger behavior.** It only checks that an insert and an update succeed.\n5. **Test data collisions.** `AccountTriggerHandler_Test` uses fixed phone numbers (such as `111-111-1111`). That's fine in a clean test context, but it would break if `SeeAllData` were ever turned on.\n\nI didn't check for Account-related custom fields, approval processes, workflow rules, duplicate or matching rules, or LWC/Aura components. I can look into any of those if you want.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 13,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 35385,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 141540,
+    "builtin": 0
+  },
+  "turns": 14,
+  "cost_usd": 0.35200240000000005,
+  "input_tokens": 12,
+  "cache_read_tokens": 102002,
+  "cache_creation_tokens": 69877,
+  "output_tokens": 5207,
+  "wall_s": 48.2,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": true,
+      "says no validation rules exist": false
+    },
+    "forbidden_flags": []
+  }
+}

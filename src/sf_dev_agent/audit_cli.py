@@ -21,9 +21,9 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
+from sf_context_engine import default_db_path
 
 from sf_dev_agent.audit import LLMAuditStore
-from sf_dev_agent.context import default_db_path
 
 console = Console()
 

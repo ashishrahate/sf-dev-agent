@@ -1,0 +1,42 @@
+{
+  "task": "T3",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "## Review of AccountTriggerHandler\n\nI read the trigger, `AccountTriggerHandler`, `AccountService` and `AccountSelector`. The handler itself is clean. The real problems are in the service it calls.\n\n### What's fine\n- **No governor-limit problems.** There is no SOQL or DML in a loop. The service does one SOQL query per trigger invocation, using a `Set` and `IN :`. Records are processed in bulk.\n- **Layering is good.** The trigger has no logic. The handler delegates to a service, and the service uses a selector.\n- **Sharing is declared** (`with sharing`) on all the classes.\n- **The trigger is thin and logic-free.**\n\n### Problems that apply\n\n**1. Duplicates inside the same batch are not detected (correctness bug).** `AccountService.preventDuplicateAccounts` only compares incoming phones against records already in the database. If one insert contains two accounts with the same new phone, both pass. `AccountTriggerHandler_Test` only tests batch records against existing ones, so it misses this. The fix is to track phones seen so far in the loop, and call `addError` on the second occurrence.\n\n**2. Unreliable duplicate check on update.** The update check at `AccountService.cls:26` skips the error when the matched record has the same Id as the one being saved. The query returns only one Id per phone, because `existingPhonesMap` keeps the last one. If two existing accounts already share a phone, the map may hold the record's own Id, and a real duplicate is missed. Use `Map<String, Set<Id>>`, or exclude `Trigger.new` Ids in the query.\n\n**3. Query returns unbounded rows.** `AccountSelector` has no `LIMIT` or selectivity guard. A bulk load of 200 records with common phone values on a large Account table could hit the 50,000-row query limit. `Phone` is not indexed by default, so the filter is non-selective. On large data volumes it risks a full table scan and a \"non-selective query\" error. Consider a custom indexed field, such as a normalized phone or an external-Id-style unique field.\n\n**4. `WITH SECURITY_ENFORCED` in a duplicate check.** If the running user lacks read access to Account.Phone, the query throws an exception. Even if the user can read it, sharing hides records they can't see. So duplicates owned by other users are invisible, and the check silently misses them. For a global uniqueness rule, use `without sharing` in the selector. Alternatively, use a native Duplicate/Matching Rule.\n\n**5. Phone formats aren't normalized.** `(111) 111-1111` and `111-111-1111` are treated as different. The comparison is also case-sensitive and whitespace-sensitive.\n\n**6. Static `bypassTrigger` flag (anti-pattern, minor).**\n- It has no guard and no audit, so any caller can disable the validation. Production code can call `setBypassTrigger` and forget to reset it.\n- Prefer a Custom Permission or Custom Metadata bypass, or at least make the reset follow a try/finally.\n- The lowercase `boolean` should be `Boolean`, to match convention.\n\n**7. Weak edge-case handling in the service.**\n- `acc.Id == null` is checked after `oldAccountMap.get(acc.Id)`, and it is redundant. In a before-insert trigger the Id is always null, so the condition is already covered by `oldAccountMap == null`.\n- The update check treats a phone change to `null` correctly. It does nothing, which is probably intended.\n\n### Test gaps\n- There is no test for a duplicate within the same batch, which is what bug 1 would expose.\n- There is no test with 200+ records to prove bulk behavior.\n- There is no test that runs as a user with limited access, to expose the sharing and FLS behavior in point 4.\n- `AccountTrigger_Test` only asserts that the Id is non-null, and its setup method is empty.\n\n### Recommended priority\n1. Fix the in-batch duplicate detection and the map-collision issue (1, 2).\n2. Decide the sharing model for the selector (4).\n3. Normalize phone values and consider indexing (3, 5).\n4. Replace the static bypass with a custom-permission approach (6).\n\nI haven't changed any files. I can implement the fixes and add the missing tests if you want.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "mcp__sf-context__code_search",
+    "Glob",
+    "Read",
+    "Grep"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 4,
+  "mcp_result_tokens_est": 2571,
+  "result_chars": {
+    "sf-context": 10285,
+    "salesforce-dx": 0,
+    "builtin": 2769
+  },
+  "turns": 6,
+  "cost_usd": 0.0671986,
+  "input_tokens": 10,
+  "cache_read_tokens": 61673,
+  "cache_creation_tokens": 8776,
+  "output_tokens": 1974,
+  "wall_s": 19.7,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

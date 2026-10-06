@@ -99,7 +99,7 @@ def prompt_extract_if_needed(session: ReplSession) -> int:
         logger.info("Extract nudge skipped — no WorkingMemoryStore on session")
         return 0
 
-    from sf_dev_agent.context import default_db_path
+    from sf_context_engine import default_db_path
     db_path = default_db_path()
 
     if is_extract_skipped(db_path, session.org.tenant_id, session.org.org_alias):

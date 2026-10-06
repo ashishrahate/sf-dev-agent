@@ -18,8 +18,6 @@ calls fire.
 
 from __future__ import annotations
 
-import os
-import sqlite3
 from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
@@ -27,26 +25,24 @@ from typing import Any
 
 import numpy as np
 import pytest
+
+# Eager import so the module-level parser registrations land before any
+# test does `parsers.base._reset_for_tests()`.
+import sf_context_engine.parsers  # noqa: F401
 from rich.console import Console
+from sf_context_engine import MetadataIndex
+from sf_context_engine.embedders.base import MockEmbedder, hash_text
+from sf_context_engine.parsers.apex_class import ApexClassParser
+from sf_context_engine.parsers.base import (
+    ParsedComponent,
+    ParsedRelationship,
+    Parser,
+    ParseResult,
+)
 
 from sf_dev_agent import repl_ui
 from sf_dev_agent.agent import AgentLoop, _reindex_files_after_write
-from sf_dev_agent.context import MetadataIndex
-from sf_dev_agent.context.embedders.base import Embedder, MockEmbedder, hash_text
-from sf_dev_agent.context.parsers.apex_class import ApexClassParser
-from sf_dev_agent.context.parsers.base import (
-    ParsedComponent,
-    ParsedRelationship,
-    ParseResult,
-    Parser,
-    _reset_for_tests,
-    dispatch,
-    register,
-)
-# Eager import so the module-level parser registrations land before any
-# test does `parsers.base._reset_for_tests()`.
-import sf_dev_agent.context.parsers  # noqa: F401
-from sf_dev_agent.memory import MemoryScope, WorkingMemoryStore
+from sf_dev_agent.memory import WorkingMemoryStore
 from sf_dev_agent.models.schemas import AgentMode, OrgConnection
 from sf_dev_agent.providers.base import (
     LLMProvider,
@@ -55,7 +51,6 @@ from sf_dev_agent.providers.base import (
     StreamChunkKind,
     consume_stream,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -75,7 +70,7 @@ def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Tmp DB redirected from default_db_path for the duration of the test."""
     db = tmp_path / "wm.db"
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path", lambda: db,
+        "sf_context_engine.default_db_path", lambda: db,
     )
     return db
 
@@ -96,7 +91,7 @@ def workspace(
 @pytest.fixture
 def restore_parsers() -> Iterator[None]:
     """Snapshot the parser registry so tests that mutate it don't leak."""
-    from sf_dev_agent.context.parsers.base import _REGISTRY
+    from sf_context_engine.parsers.base import _REGISTRY
     snapshot = list(_REGISTRY)
     yield
     _REGISTRY.clear()
@@ -334,7 +329,7 @@ def test_reindex_handles_index_open_failure(
     def boom(self: Any, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("simulated DB open failure")
     monkeypatch.setattr(
-        "sf_dev_agent.context.MetadataIndex.__init__", boom,
+        "sf_context_engine.MetadataIndex.__init__", boom,
     )
     cls_path = workspace / "X.cls"
     cls_path.write_text("public class X {}\n", encoding="utf-8")

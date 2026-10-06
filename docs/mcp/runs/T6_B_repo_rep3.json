@@ -1,0 +1,38 @@
+{
+  "task": "T6",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "My view wasn't fully current. The index was 27 minutes old and the status check said it wasn't stale, but that check only looks at age. An incremental refresh found one change in the org:\n\n- **Modified:** `ApexClass:AccountSelector`\n- **Added:** none\n- **Removed:** none\n\nThe other components were unchanged. The refresh had no parser or retrieval errors.\n\nI also re-embedded `AccountSelector`, so semantic search matches the new version. All 47 components are embedded, with the other 46 skipped as unchanged.\n\nThe refresh only reports that the class changed, not what changed in it. I can read the current `AccountSelector` source and check what depends on it if you want to know.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__build_metadata_index",
+    "mcp__sf-context__embed_metadata_index"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 420,
+  "result_chars": {
+    "sf-context": 1683,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.026543599999999997,
+  "input_tokens": 8,
+  "cache_read_tokens": 37778,
+  "cache_creation_tokens": 3663,
+  "output_tokens": 432,
+  "wall_s": 150.8,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

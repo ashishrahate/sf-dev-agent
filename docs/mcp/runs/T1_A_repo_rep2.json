@@ -1,0 +1,50 @@
+{
+  "task": "T1",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "This covers the local project source only. I didn't query the org, so anything that exists only in the org (for example validation rules created in the UI) isn't included. The project has no `objects/` folder at all, so it contains no validation rules on any object.\n\n## Account components\n\n**Trigger**\n- `AccountTrigger` runs before insert and before update. It calls `AccountTriggerHandler`.\n\n**Flow**\n- `Append_Billing_Country_to_Account_Name` is a before-save record-triggered flow on create and update. It sets `Name` to `Name - BillingCountry` when `BillingCountry` is not blank and the name doesn't already end with that suffix.\n- Its status is **Draft**, so it is not running.\n\n**Validation rules**\n- None found for Account.\n\n**Classes**\n- `AccountTriggerHandler`: has before-insert and before-update entry points and a static `setBypassTrigger` switch.\n- `AccountService`: `preventDuplicateAccounts` collects new or changed phone numbers. It blocks a save with `addError` on `Phone` if another Account already has that number.\n- `AccountSelector`: `selectByPhoneNumbers` queries `Account` by phone with `WITH SECURITY_ENFORCED`.\n- `RecordSelectorController`: generic code that works on any object. It maps the `001` ID prefix to Account, and builds dynamic SOQL and does a dynamic update.\n- `recordSelector` LWC: its meta file defaults the object to \"Account\". It calls `RecordSelectorController`.\n- Tests: `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test`, `AccountSelector_Test` and `RecordSelectorControllerTest`.\n\n## Dependencies\n\n```\nAccountTrigger (before insert/update)\n  \u2514\u2500 AccountTriggerHandler\n       \u2514\u2500 AccountService.preventDuplicateAccounts\n            \u2514\u2500 AccountSelector.selectByPhoneNumbers  \u2192 SOQL on Account\n\nrecordSelector LWC \u2192 RecordSelectorController \u2192 dynamic SOQL/DML (Account via the 001 prefix)\n\nAppend_Billing_Country_to_Account_Name flow (Draft) \u2013 standalone, no Apex calls\n```\n\n## Things to watch\n\n- **Trigger and flow interaction:** If the flow is activated, it runs in the same before-save phase as the trigger. Flow order relative to the trigger isn't guaranteed, but they touch different fields (`Name` vs `Phone`), so they don't conflict.\n- **Flow description vs. behavior:**\n  - The description says it runs only when `Name` or `BillingCountry` changes, to avoid loops. The flow has no entry condition for that.\n  - The name-ends-with check is what stops it from adding the suffix twice.\n  - If `BillingCountry` changes later, the old suffix stays and a new one is appended.\n- **Duplicate check, same-batch gap:** It only compares against existing records, not against other records in the same insert batch.\n- **Duplicate check, exact match:** It matches the phone string exactly, so different formats of the same number aren't caught.\n- **Duplicate check, bypass:** `setBypassTrigger` is a static flag and has no callers outside the tests.\n- **`RecordSelectorController`:**\n  - It is `with sharing` but builds SOQL from caller-supplied field and object names, with no field-level security checks.\n  - It truncates its stored value to 255 characters.\n  - It only recognizes a hard-coded set of ID prefixes, including a placeholder `Custom_Object__c`.\n- **Other classes:** The Lead and Case classes don't reference Account. `sfdc_default_ReportExport_Protection_Flow` isn't Account-related either.\n\nTo confirm what exists in the org, such as validation rules, active flow versions or other triggers, I can retrieve the metadata or run Tooling API queries. Say if you want that.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "Grep",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Glob",
+    "Grep"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 0,
+  "calls_builtin": 10,
+  "mcp_result_tokens_est": 0,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 0,
+    "builtin": 21865
+  },
+  "turns": 11,
+  "cost_usd": 0.116156,
+  "input_tokens": 6,
+  "cache_read_tokens": 25610,
+  "cache_creation_tokens": 21613,
+  "output_tokens": 2457,
+  "wall_s": 24.4,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": false,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": [
+      "claims the flow is not running / inactive"
+    ]
+  }
+}

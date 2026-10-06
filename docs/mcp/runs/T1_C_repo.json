@@ -1,0 +1,46 @@
+{
+  "task": "T1",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Here is what the org index (AgentforceOrg, built 9 minutes ago, 47 components) shows for Account.\n\n## Trigger\n- **AccountTrigger** runs on before insert and before update. It calls `AccountTriggerHandler`.\n\n## Flows\n- **Append_Billing_Country_to_Account_Name** is a before-save record-triggered flow on create and update. It is in **Draft** status, so it is not active. It has no Apex actions and no subflows.\n\n## Validation rules\n- None found. The index has no validation rules matching Account. I only searched the index by name for \"Account\", so a rule that doesn't mention that word would not show up. I did not query the org directly.\n\n## Apex classes\n| Class | Role | Sharing |\n|---|---|---|\n| `AccountTriggerHandler` | Called by the trigger and calls `AccountService` | with sharing |\n| `AccountService` | Business logic; uses `AccountSelector` | with sharing |\n| `AccountSelector` | Query layer | with sharing |\n| `RecordSelectorController` | Backs the `recordSelector` LWC. It references only generic `SObject`, so Account is handled dynamically. | with sharing |\n\nTests:\n- `AccountTrigger_Test`\n- `AccountTriggerHandler_Test`\n- `AccountService_Test`\n- `AccountSelector_Test`\n- `RecordSelectorControllerTest`\n\n## LWC\n- **recordSelector** is exposed on record, app and home pages. It imports `RecordSelectorController` and uses `Account.Selected_Records__c` (and the same field on Case).\n\n## Dependency chain\n```\nAccountTrigger (before insert/update)\n  \u2514\u2500 AccountTriggerHandler\n       \u2514\u2500 AccountService\n            \u2514\u2500 AccountSelector\n\nrecordSelector (LWC) \u2500 RecordSelectorController   (uses Account.Selected_Records__c)\n\nAppend_Billing_Country_to_Account_Name (Draft flow) \u2500 standalone\n```\n\nTests map to the classes by name, apart from `AccountTrigger_Test`, which has no recorded reference.\n\n## Things to note\n- The trigger and the flow are both before-save on Account. If the flow is activated, both will fire on the same saves. The flow edits the Account Name, so check that the handler doesn't also modify or depend on Name.\n- The index didn't resolve Account as an object, so there's no inbound-reference list for it. This list comes from name matches and class references. Other components could touch Account without being found, for example a flow that only looks up or updates Account records. I can read the class sources or run a Tooling API query against the org to close that gap if you want.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph"
+  ],
+  "calls_ctx": 6,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 1667,
+  "result_chars": {
+    "sf-context": 6668,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 7,
+  "cost_usd": 0.1028358,
+  "input_tokens": 8,
+  "cache_read_tokens": 50689,
+  "cache_creation_tokens": 19728,
+  "output_tokens": 1377,
+  "wall_s": 21.5,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": false,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": [
+      "claims the flow is not running / inactive"
+    ]
+  }
+}

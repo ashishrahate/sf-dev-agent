@@ -1,0 +1,53 @@
+{
+  "task": "T1",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "This is based on the local project source in `force-app`. I didn't query the live org, so anything that exists only in the org isn't covered.\n\n## Triggers\n| Trigger | Events | Calls |\n|---|---|---|\n| `AccountTrigger` (on Account) | before insert, before update | `AccountTriggerHandler.beforeInsert` and `AccountTriggerHandler.beforeUpdate` |\n\n`CaseTrigger` and `LeadTrigger` don't touch Account.\n\n## Flows\n| Flow | Type | Status | Notes |\n|---|---|---|---|\n| `Append_Billing_Country_to_Account_Name` | Record-triggered, before save, on Account, create and update | **Draft** (not active) | If `BillingCountry` is set and the Name doesn't already end with `\" - <Country>\"`, it sets `$Record.Name` to `Name - Country`. |\n| `sfdc_default_ReportExport_Protection_Flow` | Transaction security flow | Draft | Not Account-related. |\n\nThe flow's description says it only runs when Name or BillingCountry changes. The start element has no entry conditions, so it would run on every create and update.\n\n## Validation rules\nThere are none in the project. There is no `objects/Account` folder and no validation rule metadata.\n\n## Apex classes\n- **`AccountTriggerHandler`**: Has a static `bypassTrigger` flag set through `setBypassTrigger()`. Both handler methods call `AccountService.preventDuplicateAccounts`.\n- **`AccountService`**: Collects phone numbers that are new or changed. It queries for existing matches through `AccountSelector` and calls `addError` on `Phone` for any duplicate.\n- **`AccountSelector`**: `selectByPhoneNumbers` queries `Account` with `WITH SECURITY_ENFORCED`.\n- **`RecordSelectorController`**: A generic controller for the `recordSelector` LWC.\n  - It builds dynamic SOQL for any object, including Account, and `'001'` is in its prefix map.\n  - `saveSelectedRecords` runs an `update` on the record, which fires `AccountTrigger` when that record is an Account.\n  - The LWC's `objectNameToSearch` property defaults to `Account`.\n- **Tests**: `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test`, `AccountSelector_Test` and `RecordSelectorControllerTest`.\n\n## Dependencies\n```\nAccount insert/update\n \u251c\u2500 Before-save flow: Append_Billing_Country_to_Account_Name   (Draft, so inactive)\n \u2514\u2500 AccountTrigger (before insert/update)\n      \u2514\u2500 AccountTriggerHandler  (bypass flag)\n           \u2514\u2500 AccountService.preventDuplicateAccounts\n                \u2514\u2500 AccountSelector.selectByPhoneNumbers  \u2192 SOQL on Account.Phone\n\nrecordSelector LWC \u2192 RecordSelectorController\n      \u251c\u2500 searchRecords / getSelectedRecordsDetails  (dynamic SOQL on Account)\n      \u2514\u2500 saveSelectedRecords \u2192 update \u2192 AccountTrigger\n```\n\n## Things to watch\n- **Flow and trigger interaction:** If the flow is activated, it runs before the trigger in the before-save order. Its Name change doesn't affect the phone duplicate check.\n- **Duplicate check on update:** In `AccountService`, the update path skips a match only when the existing record has the same Id. Two other Accounts sharing a phone are still flagged.\n- **Duplicate check on bulk loads:** Duplicates within the same batch aren't detected, because the check only queries existing database records.\n- **Other unreviewed metadata:** I didn't check the org for Account workflow rules, process builders, or custom fields referenced by Apex. I can query the org (Tooling API for `ValidationRule`, `FlowDefinition`, `ApexTrigger`) if you want the live picture.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "Grep",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Glob",
+    "Grep",
+    "Grep",
+    "Glob",
+    "Grep"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 0,
+  "calls_builtin": 13,
+  "mcp_result_tokens_est": 0,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 0,
+    "builtin": 22314
+  },
+  "turns": 14,
+  "cost_usd": 0.0917376,
+  "input_tokens": 8,
+  "cache_read_tokens": 57008,
+  "cache_creation_tokens": 12770,
+  "output_tokens": 2924,
+  "wall_s": 27.6,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": false,
+      "says no validation rules exist": false
+    },
+    "forbidden_flags": [
+      "claims the flow is not running / inactive"
+    ]
+  }
+}

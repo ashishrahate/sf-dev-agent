@@ -1,0 +1,38 @@
+{
+  "task": "T4b",
+  "config": "C",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "Account already has a trigger and handler, so add your logic to them. Don't create a second trigger.\n\n**What's there now**\n- `AccountTrigger` fires on `before insert` and `before update`. It calls static methods on `AccountTriggerHandler`.\n- `AccountTriggerHandler.beforeInsert` currently does one thing: `AccountService.preventDuplicateAccounts(newAccounts, null)`. It also has a `bypassTrigger` flag.\n- `AccountSelector` holds the SOQL, and `AccountService` holds the business logic.\n- There are two test classes: `AccountTrigger_Test` and `AccountTriggerHandler_Test`.\n\n**Your team already decided how to do this.** A saved project decision says to use Apex triggers with a handler class, not Flows, for complex Account logic. A record-triggered Flow is only an option for simple automation.\n\n**How to add it**\n1. **Pick the event.**\n   - If the logic sets or validates fields on the new record, use `before insert`. You can write to `Trigger.new` directly with no extra DML. The trigger already covers this event.\n   - If it needs the record Id, for example to create child records, use `after insert`. You'd have to add `after insert` to the trigger's event list, plus an `else if` branch for it.\n2. **Put the logic in `AccountService`**, for example `AccountService.applyDefaults(newAccounts)`. Call it from `AccountTriggerHandler.beforeInsert` after the duplicate check. Order matters, so decide whether your logic should run before or after that check.\n3. **Keep it bulk-safe.** Loop over the whole list, and run queries and DML once per transaction, not once per record. Put any new SOQL in `AccountSelector`, which already uses `WITH SECURITY_ENFORCED`.\n4. **Add an `afterInsert` method to the handler if you need one.** Give it the same `if (bypassTrigger) return;` guard as the existing methods. If it does DML on Account, also add a recursion guard.\n5. **Add tests to `AccountTriggerHandler_Test`.** Cover a positive case, a bulk case with 200 records, and the bypass flag. Use `Database.insert(..., false)` and assert on the results, as the existing tests do.\n\nI don't have the details yet. What should the logic do, and does it need the new record's Id? Once I know, I can write the code and tests and deploy them. I'd also check whether `AccountService` already has a method that fits.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__index_status"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 4241,
+  "result_chars": {
+    "sf-context": 16966,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.056078,
+  "input_tokens": 4,
+  "cache_read_tokens": 23860,
+  "cache_creation_tokens": 10087,
+  "output_tokens": 1095,
+  "wall_s": 18.9,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

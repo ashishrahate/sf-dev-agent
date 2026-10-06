@@ -1,0 +1,45 @@
+{
+  "task": "T1",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "Here is what the index (built 20 minutes ago, 47 components) shows for Account.\n\n## Trigger\n- **`AccountTrigger`** runs before insert and before update. It only calls `AccountTriggerHandler`.\n\n## Flow\n- **`Append_Billing_Country_to_Account_Name`** is a record-triggered before-save flow on Account. It runs on create and update.\n  - v8 is active and is what runs. The latest version, v9, is a Draft. The index holds v9's source, so what I could see of the flow may differ from what is live.\n  - It has no subflows and no Apex actions.\n\n## Validation rules\n- The index has none on Account. A search for validation rules matching \"Account\" returned 0 results.\n\n## Apex classes\n| Class | Role | Sharing | References |\n|---|---|---|---|\n| `AccountTriggerHandler` | Trigger handler | with sharing | `AccountService` |\n| `AccountService` | Business logic | with sharing | `AccountSelector` |\n| `AccountSelector` | Queries | with sharing | none (only the Phone field) |\n| `AccountTrigger_Test` | Test | n/a | trigger |\n| `AccountTriggerHandler_Test` | Test | n/a | `AccountTriggerHandler` |\n| `AccountService_Test` | Test | n/a | `AccountService` |\n| `AccountSelector_Test` | Test | n/a | `AccountSelector` |\n\n## LWC and its controller\n- The **`recordSelector`** LWC uses `Account.Selected_Records__c` and `Case.Selected_Records__c`. It can be placed on record, app and home pages.\n- It imports `RecordSelectorController`, which is `with sharing` and takes generic SObjects. `RecordSelectorControllerTest` tests it.\n- This chain is separate from the trigger chain.\n\n## Dependency chain\n```\nAccountTrigger (before insert/update)\n  \u2514\u2500 AccountTriggerHandler\n       \u2514\u2500 AccountService\n            \u2514\u2500 AccountSelector\n\nFlow Append_Billing_Country_to_Account_Name (before save, create/update)   [standalone]\n\nrecordSelector (LWC) \u2192 RecordSelectorController   [standalone]\n```\n\n## Caveats\n- **Two before-save automations.** The trigger and the flow both run before save on Account insert and update. Salesforce runs before-save flows before before-triggers. The flow changes the Account name, so I would check whether the trigger or `AccountService` also reads or writes `Name`. I did not read the class source.\n- **Dependency graph limits.** I could not query the Account object itself in the graph, so these links come from each component's own references. Anything that touches Account only dynamically, such as a generic SObject, may not show up.\n- **Index scope.** The index may not cover every metadata type, for example workflow rules, process builders or other objects' triggers that update Account. An empty validation rule result could mean there are none, or that the type wasn't indexed. I can run an incremental refresh or read the class source if you want either checked.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph"
+  ],
+  "calls_ctx": 7,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 1884,
+  "result_chars": {
+    "sf-context": 7538,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 8,
+  "cost_usd": 0.0513194,
+  "input_tokens": 8,
+  "cache_read_tokens": 40297,
+  "cache_creation_tokens": 6851,
+  "output_tokens": 1584,
+  "wall_s": 19.8,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": true,
+      "says no validation rules exist": false
+    },
+    "forbidden_flags": []
+  }
+}

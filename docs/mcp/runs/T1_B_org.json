@@ -1,0 +1,47 @@
+{
+  "task": "T1",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Here is what the index shows for Account. It was built about 13 minutes ago and covers 47 components.\n\n## Trigger\n- **`AccountTrigger`** runs on before insert and before update. It calls `AccountTriggerHandler` and nothing else.\n\n## Flow\n- **`Append_Billing_Country_to_Account_Name`** is a record-triggered, before-save flow on create and update. Its status is **Draft**, so it isn't running. It has no Apex actions or subflows.\n\n## Validation rules\n- The index has none on Account. The search returned zero results. I only searched the validation-rule component type for \"Account.\", so a rule written another way could have been missed.\n\n## Apex classes\n| Class | Role | References |\n|---|---|---|\n| `AccountTriggerHandler` | Trigger handler (with sharing) | `AccountService` |\n| `AccountService` | Business logic (with sharing) | `AccountSelector` |\n| `AccountSelector` | Query layer (with sharing) | none (only `Phone`, a field name) |\n| `RecordSelectorController` | Apex controller for the LWC (with sharing) | none of the Account classes |\n| `AccountTrigger_Test` | Test | none of the Account classes |\n| `AccountTriggerHandler_Test` | Test | `AccountTriggerHandler` |\n| `AccountService_Test` | Test | `AccountService` |\n| `AccountSelector_Test` | Test | `AccountSelector` |\n| `RecordSelectorControllerTest` | Test | `RecordSelectorController` |\n\n## LWC\n- **`recordSelector`** is exposed on record, app and home pages. It imports `RecordSelectorController`. It reads `Account.Selected_Records__c` and `Case.Selected_Records__c`.\n\n## Dependency chain\n```\nAccountTrigger (before insert/update)\n  \u2514\u2500 AccountTriggerHandler\n       \u2514\u2500 AccountService\n            \u2514\u2500 AccountSelector\n\nrecordSelector (LWC) \u2500 RecordSelectorController   (separate; writes Account.Selected_Records__c)\n\nAppend_Billing_Country_to_Account_Name (Draft flow): no links to the Apex above\n```\n\n## Things to note\n- **Possible overlap:** the draft flow and the trigger are both before-save on Account, and the flow edits the Account Name. If you activate the flow, check that it doesn't conflict with what `AccountService` does. I haven't read the class source.\n- **Selector reference:** the index records `AccountSelector` as referencing only `Phone`. Check that it queries Account rather than another object.\n- **Unconfirmed links:** `AccountTrigger_Test` shows no reference to the trigger or handler. It probably exercises the trigger through DML, but the graph can't show that.\n- **Unchecked metadata:** I didn't look at Account custom fields, record types, or workflow rules and process builders. Those weren't in the results.\n\nI can open the source of `AccountService` and the flow to confirm the overlap if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph"
+  ],
+  "calls_ctx": 7,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 1729,
+  "result_chars": {
+    "sf-context": 6916,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 8,
+  "cost_usd": 0.0649176,
+  "input_tokens": 8,
+  "cache_read_tokens": 24228,
+  "cache_creation_tokens": 11079,
+  "output_tokens": 1574,
+  "wall_s": 15.2,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": false,
+      "says no validation rules exist": false
+    },
+    "forbidden_flags": [
+      "claims the flow is not running / inactive"
+    ]
+  }
+}

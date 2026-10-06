@@ -16,9 +16,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-
-from sf_dev_agent.context import MetadataIndex
-from sf_dev_agent.index_freshness import (
+from sf_context_engine import MetadataIndex
+from sf_context_engine.index_freshness import (
     check_freshness,
     format_age_human,
     format_freshness_line,
@@ -27,6 +26,7 @@ from sf_dev_agent.index_freshness import (
     stale_after_hours,
     warmup_skip_path,
 )
+
 from sf_dev_agent.models.schemas import OrgConnection
 from sf_dev_agent.tools.registry import ToolRegistry
 
@@ -217,7 +217,7 @@ def test_format_age_human(seconds: float | None, expected: str) -> None:
 
 
 def test_freshness_line_never_built() -> None:
-    from sf_dev_agent.index_freshness import IndexFreshness
+    from sf_context_engine.index_freshness import IndexFreshness
     f = IndexFreshness(
         org_alias="OrgA", last_built_at=None, age_seconds=None,
         is_stale=False, embedding_coverage_pct=0.0,
@@ -229,7 +229,7 @@ def test_freshness_line_never_built() -> None:
 
 
 def test_freshness_line_recent_built() -> None:
-    from sf_dev_agent.index_freshness import IndexFreshness
+    from sf_context_engine.index_freshness import IndexFreshness
     f = IndexFreshness(
         org_alias="OrgA", last_built_at="2026-04-27T00:00:00+00:00",
         age_seconds=3600, is_stale=False, embedding_coverage_pct=87.5,
@@ -242,7 +242,7 @@ def test_freshness_line_recent_built() -> None:
 
 
 def test_freshness_line_stale() -> None:
-    from sf_dev_agent.index_freshness import IndexFreshness
+    from sf_context_engine.index_freshness import IndexFreshness
     f = IndexFreshness(
         org_alias="OrgA", last_built_at="2026-04-25T00:00:00+00:00",
         age_seconds=48 * 3600, is_stale=True, embedding_coverage_pct=100.0,
@@ -351,7 +351,7 @@ def test_agent_injects_freshness_into_system_prompt(
 
     # Point the agent at this temporary DB.
     monkeypatch.setattr(
-        "sf_dev_agent.context.default_db_path",
+        "sf_context_engine.default_db_path",
         lambda: db,
     )
 

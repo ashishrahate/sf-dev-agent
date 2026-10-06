@@ -10,16 +10,15 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
-from sf_dev_agent.context import (
+from sf_context_engine import (
     MetadataIndex,
     MockEmbedder,
     ingest_directory,
 )
-from sf_dev_agent.context.embedders.base import hash_text
+from sf_context_engine.embedders.base import hash_text
+
 from sf_dev_agent.models.schemas import OrgConnection
 from sf_dev_agent.tools.registry import ToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # Fixture index

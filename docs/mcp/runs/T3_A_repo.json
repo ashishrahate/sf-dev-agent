@@ -1,0 +1,43 @@
+{
+  "task": "T3",
+  "config": "A",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "`AccountTriggerHandler` itself is clean, and the governor-limit risk is low. The problems are in the logic it delegates to, `AccountService.preventDuplicateAccounts` and `AccountSelector`. I haven't read the test classes or run anything.\n\n## What's fine\n- **Logic-less trigger:** `AccountTrigger` only dispatches to the handler (`AccountTrigger.trigger:1-9`).\n- **SOQL:** there is one SOQL query per transaction, outside any loop (`AccountService.cls:16`).\n- **DML:** there is none.\n- **Bulk-safe:** the code uses a `Set` and a `Map`, so it handles 200-record batches.\n- **`with sharing`:** it is declared on all three classes.\n\n## Governor-limit and scalability risks\n1. **Non-selective query** (`AccountSelector.cls:7-12`). The filter is `Phone IN :phoneNumbers`, and standard `Phone` isn't indexed by default. On an org with a large Account table (hundreds of thousands of rows), this can fail with a non-selective query error or time out in a trigger. A custom indexed, unique normalized-phone field, or the platform Duplicate/Matching Rules, avoids this.\n2. **Row cap:** if many existing accounts share a phone number, the 50k query-row limit is a theoretical concern. It is unlikely in practice.\n\n## Correctness and anti-patterns\n1. **`WITH SECURITY_ENFORCED` plus `with sharing` weakens the duplicate check** (`AccountSelector.cls:11`).\n   - Records the user can't see are invisible to the check, so duplicates slip through.\n   - A user without FLS on `Phone` gets an exception on every save.\n   - Integrity checks like this usually run in system mode (`without sharing`, no enforced FLS).\n2. **Duplicates inside the same batch aren't detected.** Two new accounts with the same phone in one insert both pass, because the check only compares against the database. Track phones seen in the loop.\n3. **The second loop doesn't apply the changed-only filter** (`AccountService.cls:23-30`).\n   - The first loop only queries new or changed phones, but the second flags any record whose phone is in the map.\n   - `existingPhonesMap` keeps one Id per phone, so with pre-existing duplicates it holds an arbitrary one.\n   - An unrelated edit to an unchanged-phone record can then be falsely blocked.\n4. **Exact string match only.** `555-1234`, `(555) 1234` and `5551234` are treated as different numbers. Normalize before comparing.\n5. **Race condition.** Two concurrent transactions can both pass the check and insert duplicates. Only a unique field or a duplicate rule closes this.\n6. **Redundant condition** (`AccountService.cls:8`). `acc.Id == null` is already covered by `oldAccountMap == null` on insert, and Id is never null on update.\n\n## Handler-specific\n- **`bypassTrigger` is a public, static, never-reset flag** (`AccountTriggerHandler.cls:3,15`).\n  - Any code can disable duplicate prevention for the rest of the transaction.\n  - If the caller throws before resetting it, the flag stays on.\n  - Callers should wrap it in `try/finally`. Better, gate it behind a custom permission or Custom Metadata setting, and limit its use to tests or data loads.\n- **Redundant guard in the trigger.** `if (Trigger.isBefore)` is always true, because the trigger only declares `before insert, before update`.\n- **Narrow event coverage.** If you later add after-events or other logic, you'll need recursion control and a more structured handler pattern. For now, the static dispatch is fine.\n\n## Suggested priority\n1. Fix the security and sharing behavior of the selector (item 1).\n2. Add in-batch duplicate detection (item 2) and restrict the second loop to changed records (item 3).\n3. Plan for selectivity and race conditions with an indexed unique field or Duplicate Rules.\n4. Harden the bypass flag.\n\nI can draft the changes to `AccountService` and `AccountSelector` if you want them.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "Read",
+    "Read",
+    "Grep",
+    "Read",
+    "Grep"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 0,
+  "calls_builtin": 6,
+  "mcp_result_tokens_est": 0,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 0,
+    "builtin": 3780
+  },
+  "turns": 7,
+  "cost_usd": 0.06719939999999999,
+  "input_tokens": 12,
+  "cache_read_tokens": 75117,
+  "cache_creation_tokens": 4963,
+  "output_tokens": 3230,
+  "wall_s": 38.1,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

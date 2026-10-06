@@ -1,0 +1,42 @@
+{
+  "task": "T3",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "## Review of AccountTriggerHandler\n\nI read the handler, the trigger, `AccountService` and `AccountSelector`. The handler is a thin dispatcher. The governor-limit behavior comes from `AccountService.preventDuplicateAccounts` and `AccountSelector.selectByPhoneNumbers`.\n\n### What is done well\n- **Bulkified:** there is one SOQL query per trigger invocation, regardless of batch size. There are no DML statements or queries inside loops.\n- **Logic separated from the trigger:** the trigger only delegates. The handler delegates to a service, and the service calls a selector.\n- **No limit risk in the lookup itself:** the query uses `IN :set`, selects only `Id, Phone`, and is skipped when the set is empty.\n\n### Problems that apply\n\n1. **Duplicates within the same batch are not detected.** This is the most important issue. `preventDuplicateAccounts` only compares incoming records against records already in the database. If a single insert contains two new accounts with the same phone, both pass. The tests don't cover this case. Fix: track phones seen in the current batch in a `Map<String, Account>` and call `addError` on the later duplicate.\n\n2. **Phone matching is unreliable.** Matching is exact-string, so `(111) 111-1111` and `111-111-1111` are not treated as duplicates. Normalize the phone (for example, strip non-digits) before putting it in the set and comparing.\n\n3. **Bypass flag is an anti-pattern (`AccountTriggerHandler.cls:3`).**\n   - `bypassTrigger` is a static boolean with a public setter. Any code can disable duplicate prevention for the rest of the transaction, and nothing forces it to be reset.\n   - The usual alternatives are a Custom Permission or Custom Metadata check, or restricting the bypass to test or specific callers.\n   - The handler also bypasses every Account trigger path at once.\n\n4. **No recursion or re-entry guard.** It's currently harmless because the trigger is before-only and does no DML. If after-triggers or field updates are added later, the static-flag style used here would be the wrong tool. Plan for that deliberately.\n\n5. **`WITH SECURITY_ENFORCED` in the selector is a functional bug for duplicate checking.**\n   - If the running user lacks read access to Account or to `Phone`, the query throws an exception, and the user's save fails with an unhelpful error.\n   - Even for users who can query, the `with sharing` class only sees records the user can access. Duplicates owned by other users in private-sharing setups won't be found.\n   - For a global uniqueness check, consider `without sharing` on the selector, or `WITH USER_MODE` where appropriate.\n   - A **Duplicate Rule or a unique field** would enforce this without the visibility gap.\n\n6. **Query selectivity and volume.** `Phone` isn't indexed by default, so on large Account tables the `Phone IN :set` filter is non-selective. This risks \"Non-selective query against large object type\" errors. Mitigation: a custom indexed, unique, normalized phone field (also solves item 2), or a request to Support to index it.\n\n7. **Concurrency gap.** Trigger-based checks can't stop two simultaneous transactions from both inserting the same phone, because neither sees the other's uncommitted row. Only a unique field or a Duplicate Rule closes that gap.\n\n### Minor points\n- **Redundant conditions at `AccountService.cls:8`:** the check `acc.Id == null` sits behind an `||` and is redundant with the `oldAccountMap == null` branch. `oldAccountMap.get(acc.Id) != null` is also always true in a before-update.\n- **Self-match check at `AccountService.cls:26`:** `existingPhonesMap` holds one Id per phone, so if two existing records share a phone, the map keeps only the last. The update's self-exclusion can then wrongly fail or pass. Use `Map<String, Set<Id>>` or a list.\n- **Naming:** the trigger has an unneeded `if (Trigger.isBefore)` wrapper, and the handler is all static, which makes it hard to mock or extend. Neither is a limit problem.\n- **Test gaps:** there are no tests for in-batch duplicates, large batches (200+ records), null phones, or a user without Account read access.\n\n### Priority\nItems 1, 5 and 2 are correctness problems you can hit today. Item 3 is the main anti-pattern. Items 6 and 7 matter as data volume and concurrency grow. I haven't changed any files. I can draft a revised `AccountService` that handles in-batch duplicates, normalization and multi-match safely, plus the tests, if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "mcp__sf-context__code_search",
+    "Glob",
+    "Read",
+    "Grep"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 4,
+  "mcp_result_tokens_est": 2571,
+  "result_chars": {
+    "sf-context": 10285,
+    "salesforce-dx": 0,
+    "builtin": 2894
+  },
+  "turns": 6,
+  "cost_usd": 0.0749496,
+  "input_tokens": 10,
+  "cache_read_tokens": 92438,
+  "cache_creation_tokens": 8833,
+  "output_tokens": 2111,
+  "wall_s": 27.3,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "task": "T4b",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "You already have an Account trigger, so add your logic to it. Don't create a second trigger or a Flow.\n\n**What exists**\n- `AccountTrigger` (`before insert, before update`) calls `AccountTriggerHandler.beforeInsert(Trigger.new)`.\n- `AccountTriggerHandler` has a `bypassTrigger` static flag. Its `beforeInsert` currently calls only `AccountService.preventDuplicateAccounts`.\n- `AccountService` holds the business logic and `AccountSelector` holds the queries.\n- Tests are in `AccountTriggerHandler_Test` and `AccountTrigger_Test`.\n\n**Why this approach**\n- Salesforce doesn't guarantee the order of multiple triggers on one object, so one trigger per object is the rule.\n- A saved team decision says complex Account logic goes in Apex triggers with a handler class, not Flows.\n\n**Steps**\n1. **Before-insert logic** (defaulting fields, validation): add a method to `AccountService` and call it from `AccountTriggerHandler.beforeInsert`, after the `bypassTrigger` check. Put any SOQL in `AccountSelector`, and keep it bulk-safe, with no queries or DML inside loops.\n2. **After-insert logic** (creating related records, callouts, events): the trigger only declares `before insert, before update`. Add `after insert` to its event list and an `afterInsert(List<Account>)` handler method. In the trigger, add an `else if (Trigger.isAfter && Trigger.isInsert)` branch, because the current code only handles `Trigger.isBefore`.\n3. **Tests:** add cases to `AccountTriggerHandler_Test`. Cover a bulk insert of 200 records, the bypass flag, and the negative case.\n\n**Two things to be aware of**\n- The handler uses static methods and doesn't extend a `TriggerHandler` base class, while `LeadTrigger` and `CaseTrigger` use `new XHandler().handle()`. I'd match the existing Account style rather than refactor it as part of this change.\n- If your logic updates Account records, add a recursion guard. The knowledge base recommends a static `Set<Id>`.\n\nWhat should the logic do, and does it need to run before or after the insert? Once I know, I can write the code and tests.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "Glob"
+  ],
+  "calls_ctx": 1,
+  "calls_dx": 0,
+  "calls_builtin": 1,
+  "mcp_result_tokens_est": 4041,
+  "result_chars": {
+    "sf-context": 16165,
+    "salesforce-dx": 0,
+    "builtin": 158
+  },
+  "turns": 3,
+  "cost_usd": 0.051619200000000004,
+  "input_tokens": 4,
+  "cache_read_tokens": 17046,
+  "cache_creation_tokens": 9698,
+  "output_tokens": 941,
+  "wall_s": 13.4,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

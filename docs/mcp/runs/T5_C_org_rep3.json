@@ -1,0 +1,38 @@
+{
+  "task": "T5",
+  "config": "C",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "No other Apex class calls `RecordSelectorController`. The index (built 19 minutes ago, 47 components) shows only two things that reference it:\n\n| Referrer | Type | How it uses it |\n|---|---|---|\n| `RecordSelectorControllerTest` | Apex test class | Calls the class directly. |\n| `recordSelector` | LWC bundle | Has `RecordSelectorController` in its Apex imports. It's exposed on Record, App and Home pages and touches `Account.Selected_Records__c` and `Case.Selected_Records__c`. |\n\n**What breaks if you rename it**\n- **`recordSelector` LWC:** its `@salesforce/apex/RecordSelectorController.<method>` imports would fail to resolve, so the component would stop deploying or loading. This is the main breakage. Anywhere the component is placed on a Lightning page would be affected.\n- **`RecordSelectorControllerTest`:** it would fail to compile because it references the old name. Since it's in the same deploy, that would block the deployment, or the tests, until you update it.\n- **Inside the class itself:** `RecordSelectorController` is a 224-line `with sharing` class. If it uses its own name in constructors or static references, those need updating too.\n\n**Caveats**\n- The index only covers Apex, LWC, flows and similar components. It can't see Aura components, Visualforce pages, or dynamic references like `Type.forName('RecordSelectorController')`. It also can't see anything edited in the org since the last build. If you use any of those, search for the old name separately.\n- I haven't looked at the source. I can pull it to list the exact `@AuraEnabled` methods the LWC imports.\n\n**If you rename it**\n1. Rename the class and its `-meta.xml`.\n2. Update the import paths in `recordSelector`'s JS.\n3. Rename or update the test class.\n4. Deploy everything together.\n5. If you deploy to an org that already has the old class, delete the old one as well, because a rename doesn't remove it.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 758,
+  "result_chars": {
+    "sf-context": 3035,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.030610599999999998,
+  "input_tokens": 4,
+  "cache_read_tokens": 23863,
+  "cache_creation_tokens": 4215,
+  "output_tokens": 897,
+  "wall_s": 15.6,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

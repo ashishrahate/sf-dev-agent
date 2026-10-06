@@ -1,0 +1,41 @@
+{
+  "task": "T6",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_r2",
+  "answer": "My view was out of date, and I've refreshed it. The index was an hour old and said it wasn't stale, but that check only looks at age and can't see edits made in the org. So I ran an incremental rebuild.\n\n**What changed**\n- The index went from 47 components to 36.\n- 33 components were re-fetched, 2 were deleted from the org, and 1 was unchanged.\n- Only 1 component needed re-embedding. The other 35 were unchanged. Coverage is back to 100%.\n\n**What's in the index now**\n- 27 Apex classes\n- 3 Apex triggers\n- 2 flows\n- 2 custom fields\n- 1 custom object\n- 1 Lightning component bundle\n\nThe refresh doesn't say which components changed or which 2 were deleted. It reports only counts. The drop from 47 to 36 is bigger than the 2 deletions, so some of it may come from how the index counts components. Your index also had RecordType and ValidationRule as component types, but none appear in the current breakdown. I can't tell from these results whether any were removed from the org.\n\nI can look for the specific components if you want. I'd search the index for the names you expect to see and check the dependency graph for anything that now has missing references.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__build_metadata_index",
+    "mcp__sf-context__embed_metadata_index",
+    "mcp__sf-context__index_status"
+  ],
+  "calls_ctx": 4,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 557,
+  "result_chars": {
+    "sf-context": 2230,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 5,
+  "cost_usd": 0.08538979999999999,
+  "input_tokens": 8,
+  "cache_read_tokens": 48909,
+  "cache_creation_tokens": 17368,
+  "output_tokens": 612,
+  "wall_s": 68.3,
+  "grade": {
+    "required_hit": 1,
+    "required_total": 2,
+    "missing": [
+      "names the changed class"
+    ],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

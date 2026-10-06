@@ -1,0 +1,38 @@
+{
+  "task": "T4b",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Account already has a trigger, so add your logic to it instead of creating a second trigger. Salesforce doesn't guarantee the order of multiple triggers on one object. Your team's saved decision also prefers Apex triggers with a handler class over Flows for complex Account logic.\n\n**What exists now**\n- `AccountTrigger` fires on `before insert, before update`. It calls `AccountTriggerHandler.beforeInsert(Trigger.new)` and `beforeUpdate(Trigger.new, Trigger.oldMap)`.\n- `AccountTriggerHandler` is `with sharing` and uses static methods. It has a `bypassTrigger` flag with `setBypassTrigger()`. Both methods call `AccountService.preventDuplicateAccounts(...)`, which rejects duplicate phone numbers.\n- `AccountSelector` holds the SOQL.\n- Tests are in `AccountTrigger_Test` and `AccountTriggerHandler_Test`.\n\nCase and Lead use a different style (`new CaseTriggerHandler().handle()`). For Account, stay with the static-method style already there.\n\n**How to add it**\n1. **Pick the event.**\n   - If you're setting or validating fields on the new records, use `before insert`. That needs no trigger change. Add a call in `AccountTriggerHandler.beforeInsert`.\n   - If you need the record Id or you're creating related records (Contacts, Tasks and so on), you need `after insert`. Change the trigger's event list to `before insert, before update, after insert`. Then add an `after insert` branch and an `afterInsert(List<Account>)` method on the handler.\n2. **Put the logic in `AccountService`**, or a new service class if it's unrelated to duplicates. The handler only delegates. Call it after `preventDuplicateAccounts` so you don't process records that will be rejected.\n3. **Bulkify.** Work on the whole `List<Account>`, with no SQL or DML inside loops. Put any new queries in `AccountSelector`.\n4. **Keep the bypass check.** New handler methods should start with `if (bypassTrigger) return;`, like the existing ones.\n5. **Guard against recursion** if your logic does DML on Account. A static `Set<Id>` guard is the usual way.\n6. **Add tests** to `AccountTriggerHandler_Test`. Cover a bulk insert of 200 records, and a case where your logic shouldn't run. Assert on the results.\n\nTell me what the logic needs to do and whether it's before or after insert. I can then write the handler, service and test changes.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__index_status"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 4296,
+  "result_chars": {
+    "sf-context": 17187,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.0535628,
+  "input_tokens": 4,
+  "cache_read_tokens": 11384,
+  "cache_creation_tokens": 10162,
+  "output_tokens": 1063,
+  "wall_s": 14.3,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

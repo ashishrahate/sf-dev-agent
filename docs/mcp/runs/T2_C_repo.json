@@ -1,0 +1,62 @@
+{
+  "task": "T2",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Accounts with a negative `AnnualRevenue` are now rejected on insert and update, and the change is deployed to the org. The deploy ran 18 tests with 0 failures.\n\n**What changed**\n- **`AccountService`:** I added `validateAnnualRevenue(List<Account>)`. It puts the error \"Annual Revenue cannot be negative.\" on the field for each negative value. Zero and null are allowed.\n- **`AccountTriggerHandler`:** `beforeInsert` and `beforeUpdate` now call the new check before the duplicate-phone check. The method signatures, `AccountTrigger` and `setBypassTrigger` are unchanged, so existing callers are unaffected. The bypass flag also skips the new check.\n- **Tests:** I added four tests to the existing `AccountTriggerHandler_Test`:\n  - insert (including zero and null)\n  - update\n  - bulk, where a mixed batch partially succeeds\n  - bypass\n\n  I put them in that class rather than creating a new one.\n\nI followed the Account pattern: logic in `AccountService`, with the handler's static methods delegating to it. The Case and Lead handlers use a different instance-based style, so I didn't copy that.\n\n**Deployment**\n- **Org:** The project has no default org set, so I deployed to `AgentforceOrg` (`<org-username>`). It is the only org configured here.\n- **Tests:** I ran `AccountTriggerHandler_Test`, `AccountService_Test` and `AccountTrigger_Test`. All 18 passed.\n- **Coverage:** `AccountTriggerHandler` has full coverage. `AccountService` has one uncovered line (line 35), which is in the existing duplicate-phone code and not part of this change.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "Glob",
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__dependency_graph",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Edit",
+    "Edit",
+    "Edit",
+    "Edit",
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__deploy_metadata"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 3,
+  "calls_builtin": 10,
+  "mcp_result_tokens_est": 1985,
+  "result_chars": {
+    "sf-context": 1393,
+    "salesforce-dx": 6550,
+    "builtin": 13534
+  },
+  "turns": 16,
+  "cost_usd": 0.12650099999999997,
+  "input_tokens": 12,
+  "cache_read_tokens": 121545,
+  "cache_creation_tokens": 15697,
+  "output_tokens": 3938,
+  "wall_s": 50.1,
+  "org_restore": "redeploy FAILED:    at async run (C:\\\\Program Files\\\\sf\\\\client\\\\node_modules\\\\@oclif\\\\core\\\\lib\\\\main.js:97:16)\\n    at async file:///C:/Program%20Files/sf/client/bin/run.js:15:1\",\n  \"cause\": \"undefined\",\n  \"warnings\": [],\n  \"code\": \"InvalidProjectWorkspaceError\",\n  \"status\": 1,\n  \"commandName\": \"DeployMetadata\"\n}\n",
+  "grade": {
+    "changed_files": [
+      "classes\\AccountService.cls",
+      "classes\\AccountTriggerHandler.cls",
+      "classes\\AccountTriggerHandler_Test.cls"
+    ],
+    "new_files": [],
+    "checks": {
+      "code references AnnualRevenue": true,
+      "rejects negative (< 0 check + addError)": true,
+      "no SOQL/DML added in loop (heuristic)": true,
+      "has test coverage change": true,
+      "followed existing structure (edited handler/service, no 2nd trigger)": true,
+      "deployed via DX (A/C) or honestly says it could not (B)": true
+    },
+    "required_hit": 6,
+    "required_total": 6
+  }
+}

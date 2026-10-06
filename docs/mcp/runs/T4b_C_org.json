@@ -1,0 +1,38 @@
+{
+  "task": "T4b",
+  "config": "C",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Use the existing Apex trigger and handler. Your team has a saved decision to put complex Account logic in Apex triggers with a handler class, not in Flows. The org already has this setup:\n\n- **`AccountTrigger`** is the only trigger on Account. It fires on `before insert` and `before update` and calls `AccountTriggerHandler`.\n- **`AccountTriggerHandler`** has `beforeInsert(List<Account>)` and `beforeUpdate(...)`. Each one checks a `bypassTrigger` flag, then calls `AccountService.preventDuplicateAccounts(...)`.\n- **`AccountService`** holds the business logic. It uses `AccountSelector` for queries, which has `WITH SECURITY_ENFORCED`.\n- **Tests** are in `AccountTriggerHandler_Test` and `AccountTrigger_Test`.\n\n**How to add your insert logic**\n\n1. **Don't create a second Account trigger.** Execution order isn't guaranteed across multiple triggers on one object.\n2. **Put the logic in `AccountService`.** Add a new method, for example `AccountService.yourLogic(List<Account>)`.\n3. **Call it from `AccountTriggerHandler.beforeInsert`.** Add the call after the bypass check and after `preventDuplicateAccounts`. That keeps the order explicit and respects the bypass flag.\n4. **Put any new SOQL in `AccountSelector`.** Query once for the whole list and use a Set or Map. Don't query inside a loop.\n5. **If you need `after insert`, change the trigger.**\n   - Add `after insert` to the event list in `AccountTrigger`.\n   - Add an `else` branch for `Trigger.isAfter`.\n   - Add an `afterInsert` method on the handler.\n   - Use `before insert` to set fields on the incoming records. Use `after insert` only for work that needs the record Id, such as creating child records.\n6. **Add tests.** Put them in `AccountTriggerHandler_Test`. Cover a bulk insert of 200 records, the positive and negative cases, and the bypass flag.\n\n**Inconsistency to know about.** `CaseTrigger` and `LeadTrigger` use `new XHandler().handle()`, which looks like a base-class framework. `AccountTrigger` uses static methods instead. I'd follow the Account pattern for now rather than refactor it as part of this change.\n\nWhat should the logic do? Is it field defaults and validation (`before insert`), or something that needs the record Id (`after insert`)? Once I know that, I can write the code.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__memory_recall"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 4369,
+  "result_chars": {
+    "sf-context": 17476,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.056746,
+  "input_tokens": 4,
+  "cache_read_tokens": 23690,
+  "cache_creation_tokens": 10280,
+  "output_tokens": 1088,
+  "wall_s": 21.3,
+  "grade": {
+    "required_hit": 2,
+    "required_total": 2,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

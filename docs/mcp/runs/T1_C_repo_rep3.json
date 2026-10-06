@@ -1,0 +1,46 @@
+{
+  "task": "T1",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "Here is what the index (47 components, built 20 minutes ago) shows for Account.\n\n## Triggers\n**`AccountTrigger`** runs before insert and before update. It calls `AccountTriggerHandler`.\n\n## Flows\n**`Append_Billing_Country_to_Account_Name`** is a record-triggered, before-save flow on Account. It runs on create and update.\n- Version 8 is active and is what runs. The index holds version 9, which is a Draft, so the details I have come from the draft rather than the live version.\n- It calls no Apex and has no subflows.\n\n## Validation rules\nThe index has none on Account. Two searches returned no matches. The index doesn't cover validation rules attached to standard objects like Account, so I can't say that none exist in the org. To check, I can run a Tooling API query on `ValidationRule` (`EntityDefinition.QualifiedApiName = 'Account'`).\n\n## Apex classes\n| Class | Role |\n|---|---|\n| `AccountTriggerHandler` | Called by the trigger and delegates to `AccountService`. |\n| `AccountService` | Has `preventDuplicateAccounts`. It collects new or changed phone numbers and calls `AccountSelector`. If another Account has the same phone, it adds an error on `Phone`. |\n| `AccountSelector` | Has `selectByPhoneNumbers`, which queries Accounts by phone. |\n| `RecordSelectorController` | Generic SObject controller. It doesn't reference Account directly. |\n\nThe tests are `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test`, `AccountSelector_Test` and `RecordSelectorControllerTest`.\n\n## LWC\n`recordSelector` imports `RecordSelectorController` and references `Account.Selected_Records__c`. It is also used with Case.\n\n## Dependency chain\n```\nAccountTrigger (before insert/update)\n  \u2514\u2500 AccountTriggerHandler\n       \u2514\u2500 AccountService\n            \u2514\u2500 AccountSelector   (queries Account by Phone)\n\nAppend_Billing_Country_to_Account_Name (before-save flow)   \u2190 standalone, no links to the Apex\n\nrecordSelector (LWC) \u2192 RecordSelectorController   \u2190 separate from the trigger chain\n```\n\n## Things to watch\n- The trigger and the flow both run before save on Account. The flow changes the Name and the trigger checks Phone, so they probably don't conflict. Salesforce runs before-save flows before before-triggers, so the trigger sees the flow's changes.\n- The duplicate check matches on exact `Phone` strings, so different phone formats won't be caught.\n- Version 9 of the flow is an unactivated draft. Activating it would change behaviour.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__retrieve_context"
+  ],
+  "calls_ctx": 8,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 3438,
+  "result_chars": {
+    "sf-context": 13754,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 9,
+  "cost_usd": 0.0725974,
+  "input_tokens": 10,
+  "cache_read_tokens": 84757,
+  "cache_creation_tokens": 9684,
+  "output_tokens": 1689,
+  "wall_s": 25.0,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": true,
+      "says no validation rules exist": false
+    },
+    "forbidden_flags": []
+  }
+}

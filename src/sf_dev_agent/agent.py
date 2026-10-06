@@ -14,8 +14,9 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
+from sf_context_engine.index_freshness import check_freshness, format_freshness_line
 
-from sf_dev_agent.index_freshness import check_freshness, format_freshness_line
+from sf_dev_agent.audit import LLMAuditStore, LLMInvocationRecord
 from sf_dev_agent.interrupt import InterruptListener
 from sf_dev_agent.memory import (
     ConversationLog,
@@ -32,14 +33,13 @@ from sf_dev_agent.models.schemas import (
     Task,
     TaskStatus,
 )
-from sf_dev_agent.audit import LLMAuditStore, LLMInvocationRecord
 from sf_dev_agent.prompts import load_system_prompt
 from sf_dev_agent.providers.base import LLMProvider, consume_stream
 from sf_dev_agent.repl_ui import (
-    render_stream_terminator,
-    render_streaming_text,
     render_file_write_diff,
     render_reindex_summary,
+    render_stream_terminator,
+    render_streaming_text,
     render_tool_blocked,
     render_tool_call_header,
     render_tool_error,
@@ -296,8 +296,8 @@ def _reindex_files_after_write(
         return summary
 
     try:
-        from sf_dev_agent.context import MetadataIndex, default_db_path
-        from sf_dev_agent.context.parsers.base import dispatch
+        from sf_context_engine import MetadataIndex, default_db_path
+        from sf_context_engine.parsers.base import dispatch
     except Exception:
         logger.exception("Reindex post-write: imports failed")
         return summary
@@ -338,7 +338,7 @@ def _reindex_files_after_write(
                         )
                     else:
                         try:
-                            from sf_dev_agent.context import create_embedder
+                            from sf_context_engine import create_embedder
                             resolved_embedder = create_embedder()
                         except Exception:
                             logger.exception(
@@ -465,7 +465,7 @@ class AgentLoop:
         # Compute index-freshness once at construction. The REPL can refresh
         # the prompt later via /index or by recreating the AgentLoop.
         try:
-            from sf_dev_agent.context import default_db_path
+            from sf_context_engine import default_db_path
             freshness = check_freshness(default_db_path(), org.org_alias)
             freshness_line = format_freshness_line(freshness)
         except Exception:
@@ -1069,7 +1069,7 @@ class AgentLoop:
         if self._audit_store is not None:
             return self._audit_store
         try:
-            from sf_dev_agent.context import default_db_path
+            from sf_context_engine import default_db_path
             self._audit_store = LLMAuditStore(default_db_path())
         except Exception:
             logger.exception("LLMAuditStore open failed — audit disabled for this run")

@@ -1,0 +1,32 @@
+[project]
+name = "sf-context-engine"
+version = "0.1.0"
+description = "Salesforce org context engine: metadata index + dependency graph, vector search, knowledge base and project memory."
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "python-dotenv>=1.2.2",
+]
+
+[project.optional-dependencies]
+gemini = ["google-genai>=1.0.0"]
+mcp = [
+    "mcp>=1.2,<2",
+]
+local = [
+    "fastembed>=0.4",
+]
+server = [
+    "mcp>=1.2,<2",
+    "fastembed>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sf_context_engine"]
+
+[project.scripts]
+sf-context-mcp = "sf_context_engine.mcp_server:main"

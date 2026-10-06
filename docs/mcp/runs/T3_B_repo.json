@@ -1,0 +1,41 @@
+{
+  "task": "T3",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "## Review of AccountTriggerHandler\n\nThe handler is clean on governor limits. The problems are in the code it calls, `AccountService` and `AccountSelector`. I read all three classes and the trigger.\n\n### What's fine\n- **No SOQL or DML in loops.** `AccountService.preventDuplicateAccounts` collects phones into a `Set`, runs one query, and uses a `Map` for lookups. That is one SOQL query per trigger invocation, so it's bulk-safe.\n- **Logic-free trigger.** `AccountTrigger` only delegates to the handler, and the handler only delegates to the service. That is the recommended layering.\n- **Selector pattern and `with sharing`** are used throughout.\n\n### Problems, most serious first\n\n1. **Duplicates within the same batch aren't detected.** This is a correctness bug.\n   - The check only compares incoming records against records already in the database.\n   - If one insert contains two accounts with the same new phone, both pass.\n   - `testBulkInsertWithDuplicates` only passes because its duplicates match existing records.\n   - Fix: track phones seen so far in the loop, and call `addError` on the second occurrence.\n\n2. **The query can hit the 50,000-row limit, and it's slow.**\n   - `Phone IN :phoneNumbers` filters on a standard field that isn't indexed. It's a non-selective filter on a large Account table.\n   - On large orgs it can throw \"Non-selective query against large object type\", and Apex triggers hit that exception.\n   - Fix: add an external ID or indexed custom field holding a normalized phone number, and query on that. Or use Duplicate/Matching Rules if declarative options are acceptable.\n\n3. **Phone matching is exact-string, so it's both over- and under-inclusive.**\n   - `555-123-4567` and `(555) 123-4567` are treated as different numbers.\n   - Phone strings differ by format, so real duplicates get through.\n   - Fix: normalize before comparing.\n\n4. **`WITH SECURITY_ENFORCED` in a validation check.**\n   - A user without field read access on Account or Phone gets a `QueryException`, which blocks their save.\n   - Even when it doesn't throw, the user can't see accounts shared outside their access, and `with sharing` hides records they can't see. So duplicates in records they can't see are silently missed.\n   - Duplicate prevention should be system-wide, so run the selector `without sharing` or in system mode. Prefer `WITH USER_MODE` or `Security.stripInaccessible` if you need explicit enforcement elsewhere. `SECURITY_ENFORCED` is also the older approach.\n\n5. **The static bypass flag is a mild anti-pattern.**\n   - `bypassTrigger` is a public global switch that anyone can set without an audit trail.\n   - If a caller forgets to reset it, it stays on for the rest of the transaction.\n   - Fix: use a Custom Permission or Custom Metadata flag. Or make sure callers reset it in a `finally` block.\n\n6. **The `map.put` lookup keeps only one Id per phone.** If the DB already holds several accounts with the same phone, only the last one is kept. The self-record check `existingPhonesMap.get(acc.Phone) == acc.Id` can then misfire, because the map may hold a different account's Id.\n\n7. **Minor issues**\n   - **Dead condition:** `|| acc.Id == null` is redundant in a before-update context.\n   - **Null-safety:** `oldAccountMap.get(acc.Id) != null` is also redundant in a before-update context.\n   - **No recursion guard:** this is fine today because there's no DML, but it would matter if the handler gains update logic.\n   - **Case/trim:** neither is handled when comparing phones.\n   - **Unused events:** the handler covers only before insert and before update. That is acceptable for this feature, but there is no undelete or after-event coverage.\n\n### Test gaps\n- No test checks duplicates within the same batch (problem 1).\n- No test covers more than 200 records through a real DML statement. The 200-record test calls the service directly, not through the trigger.\n- No test covers a user without field access (problem 4).\n\nI haven't changed anything. If you'd like, I can fix problems 1, 3, 4 and 6 in `AccountService` and `AccountSelector` and add the missing tests.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__code_search",
+    "Glob",
+    "mcp__sf-context__code_search",
+    "Read"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 0,
+  "calls_builtin": 2,
+  "mcp_result_tokens_est": 4845,
+  "result_chars": {
+    "sf-context": 19381,
+    "salesforce-dx": 0,
+    "builtin": 691
+  },
+  "turns": 5,
+  "cost_usd": 0.07543040000000001,
+  "input_tokens": 8,
+  "cache_read_tokens": 49752,
+  "cache_creation_tokens": 11616,
+  "output_tokens": 1900,
+  "wall_s": 20.0,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

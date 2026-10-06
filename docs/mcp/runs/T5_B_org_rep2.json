@@ -1,0 +1,37 @@
+{
+  "task": "T5",
+  "config": "B",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "No other Apex classes call `RecordSelectorController`. Two components reference it, according to the index.\n\n**Referencing components**\n- `RecordSelectorControllerTest` (Apex test class, 179 lines) refers to it directly.\n- The `recordSelector` LWC (API 58.0) lists it in its Apex imports. It's exposed on Record, App and Home pages, and it uses `Account.Selected_Records__c` and `Case.Selected_Records__c`.\n\n**What would break if you rename it**\n1. **`recordSelector` LWC:** The `import ... from '@salesforce/apex/RecordSelectorController.<method>'` lines would fail to resolve. The component would stop compiling or deploying. Since it's placed on Record, App and Home pages, those pages would be affected too.\n2. **`RecordSelectorControllerTest`:** It would no longer compile. That blocks deployment of the test class and removes the controller's coverage.\n3. **The class file and its metadata:** Rename `RecordSelectorController.cls` and `RecordSelectorController.cls-meta.xml` together.\n\n**Limits of this check**\n- The index only covers metadata it parsed. It won't catch dynamic references, such as `Type.forName('RecordSelectorController')`, in code outside the index.\n- It also won't catch profile or permission set class-access entries. Those reference the class by name, so check `classAccesses` in your profiles and permission sets.\n- I haven't read the source. I can search for those cases, or run an incremental `build_metadata_index` first to confirm the index is current. Say if you want either.\n\n**Suggested approach:** Rename the class, test class, and LWC imports in one deployment. Then update any profile or permission set `classAccesses` entries, and run the tests.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 581,
+  "result_chars": {
+    "sf-context": 2325,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 3,
+  "cost_usd": 0.0253054,
+  "input_tokens": 4,
+  "cache_read_tokens": 11557,
+  "cache_creation_tokens": 3849,
+  "output_tokens": 759,
+  "wall_s": 8.6,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

@@ -10,7 +10,14 @@ dependencies = [
     "rich>=15.0.0",
     "numpy>=2.0",
     "prompt_toolkit>=3.0",
+    "sf-context-engine",
 ]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+sf-context-engine = { workspace = true }
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.97.0"]
@@ -37,8 +44,8 @@ target-version = "py312"
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
+testpaths = ["tests", "packages/sf-context-engine/tests"]
+pythonpath = ["src", "packages/sf-context-engine/src"]
 markers = [
     "integration: tests that hit a live Salesforce org (run with `pytest -m integration`)",
     "smoke: live-org agent smoke tests that consume LLM tokens (run with `pytest -m smoke`)",

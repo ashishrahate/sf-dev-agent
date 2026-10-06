@@ -1,0 +1,40 @@
+{
+  "task": "T6",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_r2",
+  "answer": "My view wasn't fully current, so I refreshed it. The index was about an hour old, and the status check can't see edits made in the org. I ran an incremental rebuild, which finished with no errors.\n\n**What changed**\n- The index went from 47 components to 36, a net drop of 11.\n- The rebuild re-fetched 33 components and left 1 unchanged.\n- It reported 2 components deleted.\n- It indexed 32 relationships and skipped 215.\n\nThe 11-component drop is larger than the 2 deletions the rebuild reported, and the rebuild doesn't say which components changed. I can't tell you which ones were removed or modified. The difference may come from how the delta counts components (for example, child components that now roll up under a parent). I haven't verified that.\n\nAll 36 components are embedded, so semantic search is current. The indexed types are Apex classes, Apex triggers, custom objects, flows, LWC bundles, record types and validation rules.\n\nI can run a `code_search` or `dependency_graph` on specific components if you want to check that something you care about is still there.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__build_metadata_index",
+    "mcp__sf-context__index_status"
+  ],
+  "calls_ctx": 3,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 464,
+  "result_chars": {
+    "sf-context": 1859,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 4,
+  "cost_usd": 0.055344000000000004,
+  "input_tokens": 8,
+  "cache_read_tokens": 30440,
+  "cache_creation_tokens": 10925,
+  "output_tokens": 554,
+  "wall_s": 138.7,
+  "grade": {
+    "required_hit": 1,
+    "required_total": 2,
+    "missing": [
+      "names the changed class"
+    ],
+    "bonus": {},
+    "forbidden_flags": []
+  }
+}

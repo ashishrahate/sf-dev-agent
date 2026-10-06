@@ -1,0 +1,43 @@
+{
+  "task": "T3",
+  "config": "A",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "I read `AccountTrigger`, `AccountTriggerHandler`, `AccountService`, `AccountSelector` and the two test classes. I didn't change anything.\n\nNo default org is set in this project, so I used the only authorized org, `AgentforceOrg`. The queries were read-only against the Tooling API.\n\n## Governor limits: no violations\n- **SOQL:** there is one query per trigger invocation. It runs once per batch of up to 200 records, not once per record, and it isn't inside a loop.\n- **DML:** none.\n- **Bulkification:** it collects phones into a `Set` and queries once with `IN :phoneNumbers`. That's the correct pattern.\n- **Recursion:** the trigger is before-only with no DML, so there's no re-entry risk.\n- **Structure:** the trigger has no logic and delegates to a handler, a service and a selector. That's a good layering.\n\n## Problems that do apply\n\n**1. Correctness gap: duplicates within the same batch are not caught.**\nThe check only compares against records already in the database. Two new Accounts in one insert with the same phone both pass. The bulk test only covers duplicates against existing data, so it doesn't catch this. The fix is to track phones already seen in the loop and flag the second occurrence.\n\n**2. Unchanged records can be blocked on update.**\nThe second loop in `AccountService` checks every record with a phone. It should only check the ones in the candidate set (new or changed phone). Otherwise an unchanged record can be flagged when another record in the batch changes to its phone. `existingPhonesMap` also keeps only one Id per phone, so with legacy duplicates the \"same record\" skip becomes arbitrary.\n\n**3. The `Phone` query is non-selective at scale.**\n`Phone` isn't an indexed field. With a large Account table (hundreds of thousands of rows) this query in a trigger can fail with \"non-selective query\" errors. Standard Duplicate and Matching Rules handle this natively. Alternatively, store a normalized phone in an indexed, unique custom field.\n\n**4. `WITH SECURITY_ENFORCED` combined with `with sharing` is the wrong fit for a duplicate check.**\n- Users can't see records outside their sharing access, so duplicates they can't see slip through.\n- A user without field-level read on `Phone` gets an exception, which blocks their saves entirely.\n- A uniqueness check should usually run in system context (`without sharing` in a dedicated selector). Alternatively, use `WITH USER_MODE` deliberately if that's the intent.\n\n**5. Matching is exact-string only.**\n`111-111-1111`, `(111) 111-1111` and `1111111111` are treated as different phones. Normalize before comparing.\n\n**6. Smaller anti-patterns**\n- `|| acc.Id == null` can never be true on update, and on insert `oldAccountMap == null` already covers it. It's dead code.\n- The `existingPhonesMap.get(acc.Phone) == acc.Id` skip is effectively dead too. A changed phone can't match the record's own stored value.\n- The `Trigger.isBefore` check is redundant, since the trigger only declares before events.\n- `bypassTrigger` is a public static flag that any code can set. Prefer a custom permission or custom metadata bypass. `testBypassTrigger` also resets it without `try/finally`.\n\n## Test gaps\n- There's no test with 200 or more records, and none for the intra-batch duplicate case.\n- `AccountTrigger_Test` only asserts that an Id exists and that a name changed. Those assertions don't prove the trigger ran.\n- `testBulkUpdateWithDuplicates` does its setup DML inside `Test.startTest()`, which blurs what's being measured.\n\n## Suggested priority\nFix #1 and #2 first, because they're real behavior bugs. Then decide on #4 and #3, either by moving to native Duplicate Rules or by adding an indexed normalized field. I can draft the corrected `AccountService` and tests if you'd like.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 6,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 3681,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 14725,
+    "builtin": 0
+  },
+  "turns": 7,
+  "cost_usd": 0.0936458,
+  "input_tokens": 12,
+  "cache_read_tokens": 67979,
+  "cache_creation_tokens": 10044,
+  "output_tokens": 3985,
+  "wall_s": 40.2,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

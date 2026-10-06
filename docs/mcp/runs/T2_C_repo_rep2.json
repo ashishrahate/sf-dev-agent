@@ -1,0 +1,61 @@
+{
+  "task": "T2",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "Accounts with a negative `AnnualRevenue` are now rejected, and the change is deployed to AgentforceOrg. That's the only org configured here, and the default-org lookup returned nothing. All 17 tests passed (AccountTriggerHandler_Test, AccountTrigger_Test and AccountService_Test).\n\n- **Validation:** I added `AccountService.validateAnnualRevenue` in `AccountService.cls`. It puts the error \"Annual Revenue cannot be negative.\" on the `AnnualRevenue` field. Null and zero are allowed. It handles bulk saves, so one bad record doesn't block the rest when saving with `allOrNone=false`.\n- **Updates:** On an update, it only checks records where `AnnualRevenue` actually changed. Existing accounts that already have negative revenue can still be edited for other fields.\n- **Wiring:** `AccountTriggerHandler.beforeInsert` and `beforeUpdate` call it before the duplicate-phone check. The method signatures and `setBypassTrigger` are unchanged, and `AccountTrigger.trigger` is untouched. The handler's static-method style, its logic in `AccountService`, and its bypass flag are all kept, so the validation also respects the bypass.\n- **Tests:** I added three tests to the existing `AccountTriggerHandler_Test`: insert, update and bulk. They check that negative values are rejected and that zero, null and positive values pass. I didn't create a separate test class, because that file already covers this handler.\n\nCoverage is 100% for `AccountTriggerHandler`. `AccountService` has one uncovered line, line 37 in the deployed file. It's in the existing duplicate-phone code that I didn't change.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__retrieve_context",
+    "Glob",
+    "mcp__sf-context__memory_recall",
+    "Read",
+    "Read",
+    "Read",
+    "Read",
+    "Edit",
+    "Edit",
+    "Edit",
+    "Edit",
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__deploy_metadata"
+  ],
+  "calls_ctx": 2,
+  "calls_dx": 3,
+  "calls_builtin": 9,
+  "mcp_result_tokens_est": 5648,
+  "result_chars": {
+    "sf-context": 16192,
+    "salesforce-dx": 6402,
+    "builtin": 13077
+  },
+  "turns": 15,
+  "cost_usd": 0.16377519999999998,
+  "input_tokens": 14,
+  "cache_read_tokens": 176446,
+  "cache_creation_tokens": 21882,
+  "output_tokens": 4093,
+  "wall_s": 43.7,
+  "org_restore": "redeploy ok",
+  "grade": {
+    "changed_files": [
+      "classes\\AccountService.cls",
+      "classes\\AccountTriggerHandler.cls",
+      "classes\\AccountTriggerHandler_Test.cls"
+    ],
+    "new_files": [],
+    "checks": {
+      "code references AnnualRevenue": true,
+      "rejects negative (< 0 check + addError)": true,
+      "no SOQL/DML added in loop (heuristic)": true,
+      "has test coverage change": true,
+      "followed existing structure (edited handler/service, no 2nd trigger)": true,
+      "deployed via DX (A/C) or honestly says it could not (B)": true
+    },
+    "required_hit": 6,
+    "required_total": 6
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "task": "T3",
+  "config": "A",
+  "setting": "org",
+  "model": "sonnet",
+  "tag": "_rep3",
+  "answer": "I read the trigger, `AccountTriggerHandler`, `AccountService` and `AccountSelector` from the org (`AgentforceOrg`), because there is no local copy. I only read code and did not run the tests.\n\n`AccountTriggerHandler` is clean on its own. The problems are in the `AccountService` and `AccountSelector` classes it calls. The trigger has one per object, before events only, and no logic. The service makes one SOQL query for the whole batch, and there are no DML statements, so there are no SOQL-in-loop or DML-in-loop problems.\n\n## Governor-limit risks\n\n1. **Non-selective query (the main scaling risk).** `AccountSelector` filters on `Phone IN :phoneNumbers`, and standard `Phone` isn't indexed. That is fine on a small org. Once Account passes roughly 200k rows, you can get \"Non-selective query against large object type\" errors on inserts and updates.\n   - **Fix:** store a normalized phone in an indexed custom field, ideally a unique or external ID field. You can also ask Support for a custom index.\n2. **Query row limit.** This is low risk. A trigger chunk has at most 200 records, so the `IN` list is small. Rows only pile up if many accounts already share a phone number.\n\nNo other governor limits (CPU, heap, DML) are a concern here.\n\n## Correctness and anti-pattern problems\n\n1. **Duplicates inside the same batch are not caught.** Two new accounts with the same phone in one insert both pass, because the check only compares against rows already in the database. Track phones seen so far in the loop and flag repeats.\n2. **`with sharing` plus `WITH SECURITY_ENFORCED` weakens the check.**\n   - A user can't see accounts outside their sharing access, so they can create duplicates of records they can't see.\n   - A user without field-level read access on `Phone` gets a `QueryException` instead of a clean validation error.\n   - A uniqueness rule should query in system mode, for example `without sharing` in the selector. `SECURITY_ENFORCED` is also the older mechanism, and `WITH USER_MODE` is the current one, but user mode is the wrong choice for this check.\n3. **Race condition.** The query-then-insert pattern isn't atomic, so two concurrent transactions can both pass. Only a unique field or a native Duplicate/Matching Rule guarantees uniqueness. Standard Duplicate Rules would replace most of this code.\n4. **Exact string matching.** `111-111-1111`, `(111) 111-1111` and `1111111111` count as different numbers. Normalize to digits before comparing.\n5. **The static bypass flag is risky.**\n   - `setBypassTrigger` is public and has no permission check, so any code in the transaction can switch off the uniqueness rule.\n   - It stays on until someone resets it.\n   - Prefer a custom permission or custom metadata/hierarchy setting, or at least reset it in a `finally` block.\n6. **The existing-phone map keeps one Id per phone.** If several accounts already share a number, only the last one is kept. The \"same record\" skip in `AccountService` is also effectively dead code. The check only queries phones that changed, so the record itself never holds that phone in the database. The `acc.Id == null` condition is redundant too, since `oldAccountMap == null` already covers inserts.\n7. **Minor points.**\n   - `if (Trigger.isBefore)` is redundant because the trigger only declares before events.\n   - The handler uses static methods, so it is harder to stub and extend than an instance-based handler.\n   - API version 62 is behind the org's current v67.\n\n## Test gaps\n\n- The bulk tests use 4 records, and nothing tests 200 or more. A 201-record test would exercise the chunk boundary.\n- Nothing tests two duplicates inside one batch, which is the bug in item 1.\n- Nothing tests a user without sharing access or field access.\n- `AccountTrigger_Test` has an empty `@TestSetup`, and the tests use `System.assert` instead of the `Assert` class.\n\n## Suggested order of fixes\n\n1. Fix in-batch duplicates and make the selector query in system mode.\n2. Add a normalized, indexed unique phone field, or switch to Duplicate Rules, which addresses the scaling and race-condition risks.\n3. Lock down the bypass flag.\n\nI can draft the changes to `AccountService` and `AccountSelector` and the matching tests if you want them.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__salesforce-dx__get_username",
+    "mcp__salesforce-dx__list_all_orgs",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query",
+    "mcp__salesforce-dx__run_soql_query"
+  ],
+  "calls_ctx": 0,
+  "calls_dx": 6,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 3731,
+  "result_chars": {
+    "sf-context": 0,
+    "salesforce-dx": 14924,
+    "builtin": 0
+  },
+  "turns": 7,
+  "cost_usd": 0.0947806,
+  "input_tokens": 12,
+  "cache_read_tokens": 68133,
+  "cache_creation_tokens": 10125,
+  "output_tokens": 4063,
+  "wall_s": 44.0,
+  "grade": {
+    "required_hit": 3,
+    "required_total": 3,
+    "missing": [],
+    "bonus": {
+      "notes SOQL is in selector w/ security": true
+    },
+    "forbidden_flags": []
+  }
+}

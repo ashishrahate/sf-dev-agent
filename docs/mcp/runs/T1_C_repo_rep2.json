@@ -1,0 +1,44 @@
+{
+  "task": "T1",
+  "config": "C",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "_rep2",
+  "answer": "Based on the local index of org `AgentforceOrg` (built about 5 minutes ago, 47 components), these are the Account-related components.\n\n## Triggers\n- **`AccountTrigger`** fires on Account before insert and before update. It delegates to `AccountTriggerHandler`.\n\n## Flows\n- **`Append_Billing_Country_to_Account_Name`** is a before-save record-triggered flow on Account, firing on create and update.\n  - **Version mismatch:** v8 is active and is what runs. The indexed source is v9, which is a Draft. Treat the source with caution, because it isn't what's executing.\n  - It calls no Apex actions and has no subflows.\n  - **Possible conflict:** it changes the Account Name, and the trigger also runs before save. I haven't checked whether the two interact.\n\n## Validation rules\n- None found. A search of the index for the `ValidationRule` type returned no results. This index may not cover them for the Account object, so confirm in Setup if it matters.\n\n## Apex classes\n| Class | Role | Sharing |\n|---|---|---|\n| `AccountTriggerHandler` | Called by the trigger | with sharing |\n| `AccountService` | Business logic | with sharing |\n| `AccountSelector` | Query layer | with sharing |\n| `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test`, `AccountSelector_Test` | Tests | n/a |\n\n`Phone` shows up in the class references (`AccountSelector`, `AccountService`), so Phone is likely the field being processed or queried.\n\n## LWC and controller\n- **`recordSelector`** is an LWC (record, app and home pages). It uses `Account.Selected_Records__c` and `Case.Selected_Records__c`, and imports `RecordSelectorController`.\n- **`RecordSelectorController`** is a with sharing class that works on generic `SObject`s, not Account-specific code.\n- **`RecordSelectorControllerTest`** tests the controller.\n\n## Dependency chain\n```\nAccountTrigger (before insert/update)\n  \u2514\u2500 AccountTriggerHandler\n       \u2514\u2500 AccountService\n            \u2514\u2500 AccountSelector\n\nAppend_Billing_Country_to_Account_Name (before-save flow, v8 active)  \u2190 no Apex links\n\nrecordSelector (LWC) \u2192 RecordSelectorController   (Account.Selected_Records__c)\n```\nEach test class references only the class it tests. `AccountTrigger_Test` references the trigger's behaviour through DML only.\n\n## Caveats\n- `AccountTrigger` has 9 lines, so it appears to be a thin wrapper.\n- The index shows no incoming links to `AccountSelector` beyond `AccountService` and its test, though I only looked at `AccountService` in detail.\n- I didn't read the source of any component, so the descriptions of what each does come from names and references only.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search"
+  ],
+  "calls_ctx": 6,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 1680,
+  "result_chars": {
+    "sf-context": 6723,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 7,
+  "cost_usd": 0.0579334,
+  "input_tokens": 10,
+  "cache_read_tokens": 84257,
+  "cache_creation_tokens": 6428,
+  "output_tokens": 1535,
+  "wall_s": 22.5,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": true,
+      "says no validation rules exist": false
+    },
+    "forbidden_flags": []
+  }
+}

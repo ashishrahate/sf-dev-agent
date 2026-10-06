@@ -1,0 +1,47 @@
+{
+  "task": "T1",
+  "config": "B",
+  "setting": "repo",
+  "model": "sonnet",
+  "tag": "",
+  "answer": "Here is what the index (built 9 minutes ago from org `AgentforceOrg`) shows for Account.\n\n## Triggers\n- **`AccountTrigger`** runs on before insert and before update. It calls `AccountTriggerHandler`, and nothing else references it.\n\n## Flows\n- **`Append_Billing_Country_to_Account_Name`** is a before-save record-triggered flow on create and update. It has **Draft** status, so it isn't running. It has no Apex actions, subflows or other record operations.\n\n## Validation rules\n- The index has no validation rules on Account. My search was a text search for \"Account.\" among indexed validation rules. I did not check the rule list directly, so retrieve metadata again if you need that confirmed.\n\n## Apex classes\n| Class | Role | Sharing | References |\n|---|---|---|---|\n| `AccountTriggerHandler` | Trigger handler | with sharing | `AccountService` |\n| `AccountService` | Business logic | with sharing | `AccountSelector` |\n| `AccountSelector` | Queries | with sharing | none (only the `Phone` field) |\n| `RecordSelectorController` | Controller for the LWC below | with sharing | only generic `SObject` |\n\nThe tests are `AccountTrigger_Test`, `AccountTriggerHandler_Test`, `AccountService_Test`, `AccountSelector_Test` and `RecordSelectorControllerTest`.\n\n## LWC\n- **`recordSelector`** can be placed on record, app and home pages. It imports `RecordSelectorController` and reads `Account.Selected_Records__c` and `Case.Selected_Records__c`.\n\n## Dependency chain\n```\nAccountTrigger (before insert/update)\n  \u2514\u2500 AccountTriggerHandler\n       \u2514\u2500 AccountService\n            \u2514\u2500 AccountSelector\n\nrecordSelector (LWC) \u2500\u25ba RecordSelectorController   (generic SObject, separate from the chain above)\n\nAppend_Billing_Country_to_Account_Name (Draft flow): standalone\n```\n\n## Things to watch\n- The draft flow and the trigger both fire before save on Account. If you activate the flow, check whether it and the trigger both change `Name`.\n- `RecordSelectorController` works on generic SObjects, so the index can't show which objects it touches at runtime. Only the LWC's schema imports tie it to Account.\n- The index has only 47 components. Anything not retrieved into the org, such as managed-package automation, won't appear.",
+  "is_error": false,
+  "error_detail": "success",
+  "tool_calls": [
+    "mcp__sf-context__index_status",
+    "mcp__sf-context__memory_recall",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__code_search",
+    "mcp__sf-context__dependency_graph",
+    "mcp__sf-context__dependency_graph"
+  ],
+  "calls_ctx": 7,
+  "calls_dx": 0,
+  "calls_builtin": 0,
+  "mcp_result_tokens_est": 1728,
+  "result_chars": {
+    "sf-context": 6915,
+    "salesforce-dx": 0,
+    "builtin": 0
+  },
+  "turns": 8,
+  "cost_usd": 0.0482886,
+  "input_tokens": 8,
+  "cache_read_tokens": 39643,
+  "cache_creation_tokens": 6636,
+  "output_tokens": 1380,
+  "wall_s": 14.8,
+  "grade": {
+    "required_hit": 6,
+    "required_total": 6,
+    "missing": [],
+    "bonus": {
+      "says the flow is active (v8) and a newer draft exists": false,
+      "says no validation rules exist": true
+    },
+    "forbidden_flags": [
+      "claims the flow is not running / inactive"
+    ]
+  }
+}
