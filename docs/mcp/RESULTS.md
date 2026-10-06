@@ -1,5 +1,37 @@
 # Cross-agent test results
 
+## Summary (status as of 2026-10-06)
+
+**What this is.** `sf-context` is an MCP server that gives coding agents a persistent understanding of a Salesforce org: an index of its code and metadata with a dependency graph, a curated best-practice knowledge base, and saved team decisions. It runs locally, uses a local embedding model (no API key), and never writes to the org. It is meant to sit next to Salesforce's own DX MCP server: DX acts on the org, sf-context understands it.
+
+**What was tested.** Headless Claude Code against one developer org, three configurations (DX only, sf-context only, both), two settings (agent with a local copy of the source, agent with no local files), seven tasks, three repetitions. 93 recorded agent runs, about $6.80 in model cost as reported by Claude Code (excludes a few hung or discarded attempts).
+
+**What it showed.**
+
+| Question | Answer |
+|---|---|
+| Does it help when the agent has no local source? | **Yes.** Read-only tasks took about half the tool calls, about a third of the cost and 40% of the time of DX alone (4.8 vs 10.4 calls, $0.059 vs $0.172, 17 s vs 42 s per task), with about a fifth of the tool-result tokens. |
+| Does it help when the agent has the repo? | **A little.** About 10 to 20% cheaper and 20 to 40% faster; the agent can mostly just read files. |
+| Does it make answers more correct? | **Not measurably.** T2, T3, T4 and T5 passed in every config and repetition. The only correctness difference was a flaw the tool itself introduced (below). |
+| Does memory work across sessions? | **Yes.** The saved team decision was recalled and cited unprompted in 12 of 12 runs. |
+| Does it work next to DX MCP? | **Yes.** With both on, the agent used sf-context for questions and DX only to deploy. |
+| Does it cost context? | **Yes.** About 2,100 tokens of tool definitions, against about 4,000 for the four DX toolsets, paid every turn. |
+
+**What running it found.** Seven real defects, all fixed and verified against the live org: the server hung forever when building the index under an MCP client (a child process inherited the protocol's stdin); `sf` colour codes broke refresh; saved memories were never embedded; incremental refresh silently dropped platform events and custom metadata types; refresh results did not say what changed; the index reported a flow as "not running" when its active version was running (agents repeated it); and `index_status` called a stale index fresh because it only looks at age. That last one is mitigated, not solved: only an index refresh (1 to 2 minutes) tells you whether the org changed.
+
+**What is not known yet.**
+- **Other agents.** Only Claude Code was run. Cursor and VS Code Copilot are interactive and need a person: see `MANUAL_TESTING.md`. Results from those will be added here.
+- **Scale.** One org with 27 Apex classes. Savings on a large org are unmeasured.
+- **Embedders.** All runs used the local `fastembed` model; Gemini was not compared.
+- **Code correctness.** T2's generated code was pattern-checked, not compiled or run.
+- **Sample size.** Three repetitions per cell, one model: solid for the large effects above, not for small cost or timing differences.
+
+**Where the code is.** Branch `feature/context-mcp-server` (not merged to `main`, not published). Tests: 620 pass, 1 unrelated failure (`test_provider_factory_returns_llmprovider`, which breaks when the `openai` SDK is installed without a key).
+
+Full tables, per-task numbers, defect list and limits follow.
+
+---
+
 **Run date:** 2026-10-06. **Agent:** headless Claude Code 2.1.291 (`claude -p`, model alias `sonnet`). One agent only: Cursor and VS Code Copilot are interactive and were **not** run (procedure in `MANUAL_TESTING.md`). **Three repetitions per cell.** Runner: `scripts/mcp_bench.py`; regrading and tables: `scripts/mcp_regrade.py`; per-run summaries in `docs/mcp/runs/`.
 
 | Item | Value |
